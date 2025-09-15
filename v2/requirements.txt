@@ -1,0 +1,29 @@
+# MAE Paper Implementation Requirements
+# Python 3.8+ recommended
+
+# Core Deep Learning - CUDA 12.4 version
+# Install with: pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+# Note: Don't install torch from this file directly, use the command above for CUDA support
+# torch>=2.0.0
+# torchvision>=0.15.0
+
+# Image Processing
+Pillow>=10.0.0
+
+# Numerical Computing
+numpy>=1.24.0
+
+# Visualization
+matplotlib>=3.7.0
+
+# Tensor Operations
+einops>=0.7.0
+
+# Optional: For better performance
+# torchaudio>=2.0.0  # If using audio augmentations
+# tensorboard>=2.17.0  # For training visualization
+# tqdm>=4.65.0  # For progress bars
+
+# Development Tools (optional)
+# jupyter>=1.0.0
+# ipython>=8.12.0
