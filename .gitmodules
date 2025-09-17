@@ -1,0 +1,3 @@
+[submodule "smbdataset"]
+	path = smbdataset
+	url = https://github.com/rafaelcp/smbdataset.git
