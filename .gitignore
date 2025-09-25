@@ -1,1 +1,9 @@
 .venv/
+
+# Ignore large data files in smbdataset submodule
+smbdataset/data-smb/
+smbdataset/**/*.png
+smbdataset/**/*.jpg
+smbdataset/**/*.jpeg
+smbdataset/**/*.bmp
+smbdataset/**/*.gif
