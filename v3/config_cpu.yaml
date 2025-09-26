@@ -1,0 +1,39 @@
+# VideoMAE Baseline Configuration for CPU Testing
+# Reduced settings for faster testing without GPU
+
+# Model configuration
+model:
+  pretrained: "MCG-NJU/videomae-base"  # Use pretrained weights
+  mask_ratio: 0.75  # Lower masking ratio for easier learning
+  norm_pix_loss: true  # Normalize pixel loss
+
+# Data configuration
+data:
+  data_root: "../smbdataset/data-smb"  # Path to SMB dataset
+  image_size: 224  # Must match pretrained model size
+  num_frames: 8  # Fewer frames for CPU
+  num_workers: 2  # Fewer workers for CPU
+
+# Training configuration
+training:
+  num_epochs: 5  # Very few epochs for testing
+  batch_size: 2  # Very small batch for CPU
+  learning_rate: 1.5e-4  # Base learning rate
+  min_lr: 1e-6  # Minimum learning rate for cosine schedule
+  weight_decay: 0.05  # Weight decay for AdamW
+  gradient_clip: 1.0  # Gradient clipping value
+  seed: 42  # Random seed for reproducibility
+  val_interval: 1  # Validate every epoch
+  save_interval: 5  # Save checkpoint every N epochs
+  checkpoint_dir: "results/checkpoints"
+
+# Evaluation configuration
+evaluation:
+  batch_size: 1  # Single sample for CPU evaluation
+  num_visualizations: 3  # Fewer visualizations
+  visualization_dir: "results/visualizations"
+
+# Logging configuration
+logging:
+  tensorboard_dir: "results/tensorboard"
+  log_interval: 10  # Log every N batches
