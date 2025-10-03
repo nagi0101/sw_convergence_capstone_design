@@ -75,6 +75,208 @@ v3/
 ### Hierarchical Spatial-Temporal Masked Autoencoder (HST-MAE)
 본 프로젝트는 VideoMAE V2, 계층적 비전 트랜스포머, 다중 모달 융합 기법을 결합한 게임 세션 리플레이 전용 시스템을 구현합니다.
 
+### 아키텍처 다이어그램
+
+```mermaid
+flowchart TB
+    %% Input Processing
+    subgraph Input["입력 처리 파이프라인"]
+        GameFrames["게임 프레임<br/>256×240 RGB"]
+        StateVectors["상태 벡터<br/>(카메라 위치, 캐릭터 위치,<br/>게임 파라미터)"]
+
+        GameFrames --> Masking["이중 마스킹<br/>인코더: 90-95%<br/>디코더: 50%"]
+        Masking --> SpatioTemporal["3D 시공간 큐브<br/>2×16×16 픽셀"]
+        SpatioTemporal --> TokenGen["토큰 생성<br/>T×H×W → (T/2)×(H/16)×(W/16)"]
+    end
+
+    %% State Encoding Branch
+    subgraph StateEncoding["상태 인코딩 네트워크"]
+        StateVectors --> StateProj["Linear Projection<br/>state_dim → 768"]
+        StateProj --> StatePosEnc["Positional Encoding<br/>(Sinusoidal)"]
+        StatePosEnc --> StateTransformer["State Transformer<br/>4 Layers, 8 Heads"]
+        StateTransformer --> StateOutput["Output Projection<br/>768 → encoder_dim"]
+    end
+
+    %% Hierarchical Encoder
+    subgraph Encoder["계층적 인코더 (Swin Transformer)"]
+        TokenGen --> Stage1["Stage 1<br/>768-dim, 56×56<br/>공간 세부사항"]
+        Stage1 --> CrossAttn1["Cross-Attention<br/>with State Vector"]
+        StateOutput --> CrossAttn1
+
+        CrossAttn1 --> Stage2["Stage 2<br/>1024-dim, 28×28<br/>중간 특징"]
+        Stage2 --> CrossAttn2["Cross-Attention<br/>with State Vector"]
+        StateOutput --> CrossAttn2
+
+        CrossAttn2 --> Stage3["Stage 3<br/>1280-dim, 14×14<br/>의미적 특징"]
+        Stage3 --> CrossAttn3["Cross-Attention<br/>with State Vector"]
+        StateOutput --> CrossAttn3
+
+        CrossAttn3 --> Stage4["Stage 4<br/>1408-dim, 7×7<br/>전역 맥락"]
+
+        Stage4 --> LatentRep["잠재 표현 Z<br/>Continuous Features"]
+    end
+
+    %% Region-Aware Processing
+    subgraph RegionAware["지역 인식 처리"]
+        LatentRep --> RegionEmbed["지역 임베딩<br/>256-dim per region"]
+        RegionEmbed --> IntraRegion["지역 내 처리<br/>High Similarity"]
+        RegionEmbed --> InterRegion["지역 간 처리<br/>25% Connections"]
+        IntraRegion --> SpatialMemory["공간 메모리 뱅크<br/>EMA Update"]
+        InterRegion --> SpatialMemory
+    end
+
+    %% Compression Pipeline
+    subgraph Compression["압축 파이프라인 (RVQ)"]
+        SpatialMemory --> Codebook1["Codebook 1<br/>512 entries<br/>q₁, r₁ = Z - q₁"]
+        Codebook1 --> Codebook2["Codebook 2<br/>512 entries<br/>q₂, r₂ = r₁ - q₂"]
+        Codebook2 --> CodebookN["...<br/>Codebooks 3-6"]
+        CodebookN --> Indices["코드북 인덱스<br/>54 bits per cube<br/>(9 bits × 6)"]
+    end
+
+    %% Storage
+    subgraph Storage["저장 최적화"]
+        Indices --> EntropyCode["엔트로피 코딩<br/>Arithmetic Coding"]
+        EntropyCode --> DeltaEncode["시간적 델타 인코딩<br/>프레임 간 차이"]
+        DeltaEncode --> Keyframes["키프레임<br/>16-32 프레임 간격"]
+        Keyframes --> CompressedData["압축된 데이터<br/>42× 압축률"]
+    end
+
+    %% Decoding Pipeline
+    subgraph Decoder["디코딩 파이프라인"]
+        CompressedData --> RetrieveVectors["코드북 벡터 검색"]
+        RetrieveVectors --> SumVectors["벡터 합산<br/>Z_reconstructed = Σ(q_i)"]
+        SumVectors --> LightDecoder["경량 디코더<br/>4 Transformer Blocks"]
+
+        StateOutput --> DecoderCrossAttn["Cross-Attention<br/>재구성 가이드"]
+        LightDecoder --> DecoderCrossAttn
+
+        DecoderCrossAttn --> HierarchicalDecode["계층적 디코딩<br/>중요도 순서"]
+        HierarchicalDecode --> RegionDecode1["Region 1<br/>Critical (UI, objectives)"]
+        HierarchicalDecode --> RegionDecode2["Region 2<br/>Complex (characters)"]
+        HierarchicalDecode --> RegionDecode3["Region 3<br/>Simple (background)"]
+    end
+
+    %% Output
+    subgraph Output["출력"]
+        RegionDecode1 --> FinalReconstruct["최종 재구성"]
+        RegionDecode2 --> FinalReconstruct
+        RegionDecode3 --> FinalReconstruct
+        FinalReconstruct --> OutputFrame["복원된 게임 프레임<br/>224×224 RGB"]
+    end
+
+    %% Loss Computation
+    subgraph Loss["손실 함수"]
+        OutputFrame --> LossRecon["L_reconstruction<br/>MSE (λ=1.0)"]
+        OutputFrame --> LossSpatial["L_spatial_consistency<br/>지역 내 유사성 (λ=0.3)"]
+        OutputFrame --> LossTemporal["L_temporal_coherence<br/>시간적 일관성 (λ=0.2)"]
+        OutputFrame --> LossState["L_state_alignment<br/>상태 정렬 (λ=0.1)"]
+
+        LossRecon --> TotalLoss["L_total"]
+        LossSpatial --> TotalLoss
+        LossTemporal --> TotalLoss
+        LossState --> TotalLoss
+    end
+
+    %% Style definitions
+    classDef inputClass fill:#e1f5fe,stroke:#01579b,stroke-width:2px
+    classDef encoderClass fill:#f3e5f5,stroke:#4a148c,stroke-width:2px
+    classDef decoderClass fill:#e8f5e9,stroke:#1b5e20,stroke-width:2px
+    classDef storageClass fill:#fff3e0,stroke:#e65100,stroke-width:2px
+    classDef lossClass fill:#fce4ec,stroke:#880e4f,stroke-width:2px
+    classDef attentionClass fill:#fff9c4,stroke:#f57f17,stroke-width:2px
+
+    class GameFrames,StateVectors,Masking,SpatioTemporal,TokenGen inputClass
+    class Stage1,Stage2,Stage3,Stage4,LatentRep encoderClass
+    class LightDecoder,RegionDecode1,RegionDecode2,RegionDecode3,FinalReconstruct,OutputFrame decoderClass
+    class Indices,EntropyCode,DeltaEncode,Keyframes,CompressedData storageClass
+    class LossRecon,LossSpatial,LossTemporal,LossState,TotalLoss lossClass
+    class CrossAttn1,CrossAttn2,CrossAttn3,DecoderCrossAttn attentionClass
+```
+
+### 모델 변형별 상세 아키텍처
+
+```mermaid
+graph LR
+    subgraph BaseModel["HST-MAE-Base (180M)"]
+        B_Enc["인코더<br/>120M params<br/>45 GFLOPs"]
+        B_Dec["디코더<br/>60M params<br/>4 blocks"]
+        B_Perf["성능<br/>85 FPS @ RTX3090<br/>8GB GPU"]
+        B_Enc --> B_Dec
+        B_Dec --> B_Perf
+    end
+
+    subgraph LargeModel["HST-MAE-Large (450M)"]
+        L_Enc["인코더<br/>350M params<br/>120 GFLOPs"]
+        L_Dec["디코더<br/>100M params<br/>8 blocks"]
+        L_Perf["성능<br/>35 FPS @ RTX3090<br/>16GB GPU"]
+        L_Enc --> L_Dec
+        L_Dec --> L_Perf
+    end
+
+    subgraph Metrics["성능 지표"]
+        PSNR["PSNR: 38.5 dB"]
+        SSIM["SSIM: 0.94/0.87<br/>(intra/inter-region)"]
+        LPIPS["LPIPS: 0.08"]
+        Compression["압축률: 42×<br/>대역폭: 1.2 Mbps"]
+
+        PSNR --> Quality["재구성 품질"]
+        SSIM --> Quality
+        LPIPS --> Quality
+        Compression --> Efficiency["효율성"]
+    end
+
+    BaseModel -.-> Metrics
+    LargeModel -.-> Metrics
+
+    classDef baseClass fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
+    classDef largeClass fill:#fce4ec,stroke:#c62828,stroke-width:2px
+    classDef metricsClass fill:#f1f8e9,stroke:#33691e,stroke-width:2px
+
+    class B_Enc,B_Dec,B_Perf baseClass
+    class L_Enc,L_Dec,L_Perf largeClass
+    class PSNR,SSIM,LPIPS,Compression,Quality,Efficiency metricsClass
+```
+
+### 학습 전략 플로우
+
+```mermaid
+flowchart LR
+    subgraph Phase1["Phase 1: Easy Reconstruction<br/>(Epochs 1-400)"]
+        P1_Mask["마스킹: 85% → 90%<br/>정보량 적은 영역"]
+        P1_Learn["기본 재구성 학습"]
+        P1_Mask --> P1_Learn
+    end
+
+    subgraph Phase2["Phase 2: Balanced Learning<br/>(Epochs 401-800)"]
+        P2_Mask["마스킹: 90%<br/>랜덤 패턴"]
+        P2_Learn["공간 유사성 +<br/>상태 벡터 활용"]
+        P2_Mask --> P2_Learn
+    end
+
+    subgraph Phase3["Phase 3: Adversarial Refinement<br/>(Epochs 801-1200)"]
+        P3_Mask["마스킹: 90-95%<br/>중요 영역 타겟"]
+        P3_Learn["강건한 표현 +<br/>상태 벡터 의존"]
+        P3_Mask --> P3_Learn
+    end
+
+    Phase1 --> Phase2
+    Phase2 --> Phase3
+
+    P1_Learn --> Optimizer["AdamW Optimizer<br/>LR: 1.5e-4<br/>Cosine Decay<br/>40-epoch Warmup"]
+    P2_Learn --> Optimizer
+    P3_Learn --> Optimizer
+
+    classDef phase1Class fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
+    classDef phase2Class fill:#fff3e0,stroke:#ef6c00,stroke-width:2px
+    classDef phase3Class fill:#ffebee,stroke:#c62828,stroke-width:2px
+    classDef optimizerClass fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
+
+    class P1_Mask,P1_Learn phase1Class
+    class P2_Mask,P2_Learn phase2Class
+    class P3_Mask,P3_Learn phase3Class
+    class Optimizer optimizerClass
+```
+
 #### 핵심 아키텍처 구성요소:
 
 ##### 1. 입력 처리 파이프라인
