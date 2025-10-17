@@ -1,6 +1,6 @@
 data_root: ${oc.env:SMB_DATA_ROOT,../smbdataset/data-smb}
 image_size: 224
 num_frames: 16
-num_workers: 8
+num_workers: 10
 persistent_workers: true
-prefetch_factor: 4
+prefetch_factor: 6
