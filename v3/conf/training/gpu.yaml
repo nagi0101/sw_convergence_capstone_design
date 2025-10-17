@@ -1,8 +1,8 @@
 num_epochs: 100
-batch_size: 64
+batch_size: 48
 accumulation_steps: 1
-learning_rate: 0.00064
-min_lr: 0.000008
+learning_rate: 0.00048
+min_lr: 0.000006
 weight_decay: 0.05
 gradient_clip: 1.0
 seed: 42
