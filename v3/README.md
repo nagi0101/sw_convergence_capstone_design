@@ -65,6 +65,9 @@ python train.py
 # Stream metrics to Weights & Biases
 python train.py logging.wandb.enable=true
 
+# Lightweight debug run (1 epoch, wandb + tensorboard intact)
+python train.py training=debug logging=debug output=debug data.num_workers=0
+
 # Resume training from checkpoint
 python train.py training.resume=results/checkpoints/checkpoint_epoch_100.pth
 
@@ -108,6 +111,10 @@ python train.py training.batch_size=4 data.num_frames=8
 
 # Switch to CPU preset
 python train.py --config-name config_cpu
+
+# Enable debug presets for rapid iteration
+python train.py training=debug logging=debug output=debug
+#   (wandb remains enabled; set WANDB_MODE=offline for local runs)
 ```
 
 Per-run artifacts (checkpoints, TensorBoard logs, visualizations, evaluation summaries) are written under `results/hydra/<timestamp>/` by default. See `conf/output/default.yaml` to customize these locations.

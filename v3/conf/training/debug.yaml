@@ -1,0 +1,11 @@
+num_epochs: 1
+batch_size: 1
+learning_rate: 0.00015
+min_lr: 0.000001
+weight_decay: 0.05
+gradient_clip: 1.0
+seed: 42
+val_interval: 1
+save_interval: 1
+checkpoint_dir: ${output.checkpoint_dir}
+resume: null

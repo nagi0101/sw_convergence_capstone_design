@@ -1,0 +1,19 @@
+tensorboard_dir: ${output.tensorboard_dir}
+log_interval: 1
+wandb:
+    enable: true
+    mode: ${oc.env:WANDB_MODE,offline}
+    project: null
+    entity: null
+    run_name: ${hydra:job.name}
+    group: ${hydra:job.override_dirname}
+    notes: ""
+    tags: []
+    watch:
+        log: gradients
+        log_freq: 200
+    log_checkpoints: true
+    log_results: true
+    log_visualizations: true
+    visualization_interval: 1
+    max_visualizations: 1
