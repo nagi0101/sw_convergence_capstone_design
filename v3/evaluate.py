@@ -6,7 +6,7 @@ Computes PSNR, SSIM, MSE and other metrics
 import os
 import time
 import yaml
-from typing import Dict
+from typing import Dict, Optional
 
 import torch
 import numpy as np
@@ -17,7 +17,7 @@ import matplotlib.pyplot as plt
 
 import hydra
 from hydra.utils import to_absolute_path
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 from transformers import VideoMAEForPreTraining, VideoMAEImageProcessor, VideoMAEConfig
 from dataset import create_dataloaders
@@ -35,12 +35,17 @@ class VideoMAEEvaluator:
 
         self.visualization_dir = os.path.abspath(self.config.evaluation.visualization_dir)
         os.makedirs(self.visualization_dir, exist_ok=True)
+        self.artifacts_dir = os.path.abspath(self.config.output.artifacts_dir)
+        os.makedirs(self.artifacts_dir, exist_ok=True)
 
         # Load model
         self._load_model(checkpoint_path)
 
         # Setup data
         self._setup_data()
+
+        # Optional W&B logging
+        self._setup_wandb()
 
     def _load_model(self, checkpoint_path: str) -> None:
         """Load trained model from checkpoint"""
@@ -93,6 +98,162 @@ class VideoMAEEvaluator:
             num_frames=self.config.data.num_frames,
             image_size=self.config.data.image_size
         )
+
+    def _setup_wandb(self) -> None:
+        """Initialise optional W&B logging."""
+
+        self.use_wandb = False
+        self._wandb: Optional[object] = None
+        self.wandb_run: Optional[object] = None
+        self._wandb_visualizations = 0
+        self._wandb_max_visualizations = 0
+        self._wandb_log_visuals = False
+        self._wandb_log_results = False
+
+        if not hasattr(self.config.logging, "wandb"):
+            return
+
+        wandb_cfg = self.config.logging.wandb
+        if not bool(wandb_cfg.enable):
+            return
+
+        try:
+            import wandb  # type: ignore[import]
+        except ImportError as exc:
+            raise ImportError(
+                "Weights & Biases logging requested for evaluation but the `wandb` package is missing. "
+                "Install it with `pip install wandb` or disable logging with logging.wandb.enable=false."
+            ) from exc
+
+        wandb_cfg_dict = OmegaConf.to_container(wandb_cfg, resolve=True)
+        if not isinstance(wandb_cfg_dict, dict):
+            raise TypeError("logging.wandb configuration must resolve to a dictionary")
+
+        tags_value = wandb_cfg_dict.get("tags")
+        tags = list(tags_value) if tags_value else []
+        tags.append("evaluation")
+
+        run_name = wandb_cfg_dict.get("run_name")
+        eval_run_name = f"{run_name}-eval" if run_name else None
+
+        init_kwargs = {
+            "mode": wandb_cfg_dict.get("mode", "online"),
+            "config": OmegaConf.to_container(self.config, resolve=True),
+            "job_type": "evaluation",
+            "tags": tags,
+        }
+
+        mapping = {
+            "project": "project",
+            "entity": "entity",
+            "group": "group",
+            "notes": "notes",
+        }
+
+        for source_key, target_key in mapping.items():
+            value = wandb_cfg_dict.get(source_key)
+            if value:
+                init_kwargs[target_key] = value
+
+        if eval_run_name:
+            init_kwargs["name"] = eval_run_name
+
+        self.wandb_run = wandb.init(**init_kwargs)
+        self._wandb = wandb
+        self.use_wandb = True
+
+        self._wandb_visualizations = 0
+        self._wandb_max_visualizations = int(wandb_cfg_dict.get("max_visualizations", 0) or 0)
+        self._wandb_log_visuals = bool(wandb_cfg_dict.get("log_visualizations", False))
+        self._wandb_log_results = bool(wandb_cfg_dict.get("log_results", True))
+
+    def _log_wandb_batch_metrics(
+        self,
+        metrics: Dict[str, float],
+        inference_time: float,
+        batch_idx: int
+    ) -> None:
+        if not self.use_wandb or self._wandb is None:
+            return
+
+        payload = {
+            'eval/batch_psnr': metrics['psnr'],
+            'eval/batch_ssim': metrics['ssim'],
+            'eval/batch_mse': metrics['mse'],
+            'eval/batch_inference_time': inference_time,
+        }
+        wandb_module = self._wandb
+        if wandb_module is None:
+            return
+        wandb_module.log(payload, step=batch_idx)
+
+    def _log_wandb_visualization(
+        self,
+        original_np: np.ndarray,
+        reconstruction_np: np.ndarray,
+        idx: int,
+        global_step: int
+    ) -> None:
+        if (
+            not self.use_wandb
+            or self._wandb is None
+            or not self._wandb_log_visuals
+        ):
+            return
+
+        if self._wandb_max_visualizations and self._wandb_visualizations >= self._wandb_max_visualizations:
+            return
+
+        wandb_module = self._wandb
+        if wandb_module is None:
+            return
+
+        images = [
+            wandb_module.Image(original_np, caption=f"original_{idx}"),
+            wandb_module.Image(reconstruction_np, caption=f"reconstruction_{idx}"),
+        ]
+        wandb_module.log({'eval/visualizations': images}, step=global_step)
+        self._wandb_visualizations += 1
+
+    def _log_wandb_final_metrics(self, metrics: Dict[str, float], step: int) -> None:
+        if not self.use_wandb or self._wandb is None:
+            return
+
+        payload = {f"eval/{key}": value for key, value in metrics.items()}
+        wandb_module = self._wandb
+        if wandb_module is None:
+            return
+        wandb_module.log(payload, step=step)
+
+        if self.wandb_run is not None:
+            summary = getattr(self.wandb_run, 'summary', None)
+            if summary is not None:
+                for key, value in payload.items():
+                    summary[key] = value
+
+    def log_results_artifact(self, results_path: str) -> None:
+        if (
+            not self.use_wandb
+            or self._wandb is None
+            or self.wandb_run is None
+            or not self._wandb_log_results
+            or not os.path.exists(results_path)
+        ):
+            return
+
+        wandb_module = self._wandb
+        if wandb_module is None:
+            return
+
+        artifact_name = f"evaluation-results-{getattr(self.wandb_run, 'id', 'latest')}"
+        artifact = wandb_module.Artifact(artifact_name, type="evaluation-results")
+        artifact.add_file(results_path)
+        if hasattr(self.wandb_run, 'log_artifact'):
+            self.wandb_run.log_artifact(artifact)
+
+    def finish_wandb(self) -> None:
+        if self.use_wandb and self._wandb is not None:
+            self._wandb.finish()
 
     def _generate_mask(self, batch_size: int, num_patches: int) -> torch.Tensor:
         """Generate tube masking for VideoMAE"""
@@ -224,6 +385,8 @@ class VideoMAEEvaluator:
             all_metrics['mse'].update(metrics['mse'], batch_size)
             all_metrics['inference_time'].update(inference_time / batch_size, batch_size)
 
+            self._log_wandb_batch_metrics(metrics, inference_time, batch_idx)
+
             # Update progress bar
             pbar.set_postfix({
                 'PSNR': f"{all_metrics['psnr'].avg:.2f}",
@@ -236,6 +399,7 @@ class VideoMAEEvaluator:
                 self.save_visualization(
                     pixel_values[0],
                     reconstruction[0],
+                    batch_idx,
                     batch_idx
                 )
 
@@ -266,9 +430,18 @@ class VideoMAEEvaluator:
             'memory_mb': float(memory_mb)
         }
 
+        final_step = len(self.test_loader) if self.test_loader is not None else 0
+        self._log_wandb_final_metrics(results, final_step)
+
         return results
 
-    def save_visualization(self, original: torch.Tensor, reconstruction: torch.Tensor, idx: int) -> None:
+    def save_visualization(
+        self,
+        original: torch.Tensor,
+        reconstruction: torch.Tensor,
+        idx: int,
+        global_step: int
+    ) -> None:
         """Save visualization of original vs reconstructed frames"""
         # Denormalize
         mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1).to(self.device)
@@ -304,6 +477,8 @@ class VideoMAEEvaluator:
         plt.savefig(save_path, dpi=100, bbox_inches='tight')
         plt.close()
 
+        self._log_wandb_visualization(orig_np, recon_np, idx, global_step)
+
 
 @hydra.main(config_path="conf", config_name="config", version_base="1.3")
 def main(cfg: DictConfig) -> None:
@@ -328,6 +503,9 @@ def main(cfg: DictConfig) -> None:
     # Save results
     with open(results_path, 'w') as f:
         yaml.dump(results, f)
+
+    evaluator.log_results_artifact(results_path)
+    evaluator.finish_wandb()
 
     print(f"\nResults saved to {results_path}")
 

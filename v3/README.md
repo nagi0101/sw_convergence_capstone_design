@@ -62,6 +62,9 @@ Set the `SMB_DATA_ROOT` environment variable to point elsewhere if the dataset l
 # Train with default GPU configuration
 python train.py
 
+# Stream metrics to Weights & Biases
+python train.py logging.wandb.enable=true
+
 # Resume training from checkpoint
 python train.py training.resume=results/checkpoints/checkpoint_epoch_100.pth
 
@@ -74,6 +77,9 @@ python train.py --config-name config_cpu
 ```bash
 # Evaluate trained model
 python evaluate.py evaluation.checkpoint_path=results/checkpoints/best_model.pth
+
+# Evaluate and push metrics to Weights & Biases
+python evaluate.py evaluation.checkpoint_path=results/checkpoints/best_model.pth logging.wandb.enable=true
 
 # Override evaluation outputs or batch size as needed
 python evaluate.py evaluation.checkpoint_path=results/checkpoints/best_model.pth evaluation.results_file=results/eval_gpu.yaml evaluation.batch_size=2
@@ -147,6 +153,13 @@ v3/
 # Launch TensorBoard (aggregates run-specific logs)
 tensorboard --logdir results/hydra
 ```
+
+### Weights & Biases Logging
+
+-   Set `WANDB_API_KEY` (and optional `WANDB_MODE=offline`) before running any script.
+-   Enable logging via `logging.wandb.enable=true` or by appending `--wandb` to the provided `.bat` launchers.
+-   Default metadata (project, entity, tags, checkpoint uploads) lives in `conf/logging/base.yaml` and can be overridden per run.
+-   Training uploads include loss/lr curves, periodic frame previews, and checkpoint files (when `log_checkpoints` is true); evaluation pushes per-batch metrics, summary scores, and visualization pairs.
 
 ## Troubleshooting
 

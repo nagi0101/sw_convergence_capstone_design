@@ -4,7 +4,9 @@ Uses Hugging Face Transformers implementation
 """
 
 import os
+from typing import Optional
 
+import numpy as np
 import torch
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
@@ -13,7 +15,7 @@ from tqdm import tqdm
 
 import hydra
 from hydra.utils import to_absolute_path
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 from transformers import (
     VideoMAEForPreTraining,
@@ -54,6 +56,12 @@ class VideoMAETrainer:
         self.best_val_loss = float('inf')
         self.checkpoint_dir = os.path.abspath(self.config.training.checkpoint_dir)
         os.makedirs(self.checkpoint_dir, exist_ok=True)
+        self.artifacts_dir = os.path.abspath(self.config.output.artifacts_dir)
+        os.makedirs(self.artifacts_dir, exist_ok=True)
+
+        self.steps_per_epoch = max(len(self.train_loader), 1)
+
+        self._setup_wandb()
 
     def _setup_model(self) -> None:
         """Initialize VideoMAE model"""
@@ -126,6 +134,110 @@ class VideoMAETrainer:
             T_max=total_steps,
             eta_min=self.config.training.min_lr
         )
+
+    def _setup_wandb(self) -> None:
+        """Initialise optional Weights & Biases logging."""
+
+        # Defaults when wandb logging is disabled
+        self.use_wandb = False
+        self._wandb: Optional[object] = None
+        self.wandb_run: Optional[object] = None
+        self._wandb_visualizations = 0
+        self._wandb_max_visualizations = 0
+        self._wandb_visualization_interval = 1
+        self._wandb_log_visuals = False
+        self._wandb_log_checkpoints = False
+
+        if not hasattr(self.config.logging, "wandb"):
+            return
+
+        wandb_cfg = self.config.logging.wandb
+        if not bool(wandb_cfg.enable):
+            return
+
+        try:
+            import wandb  # type: ignore[import]
+        except ImportError as exc:
+            raise ImportError(
+                "Weights & Biases logging requested but the `wandb` package is not installed. "
+                "Install it with `pip install wandb` or disable logging with logging.wandb.enable=false."
+            ) from exc
+
+        wandb_cfg_dict = OmegaConf.to_container(wandb_cfg, resolve=True)
+        if not isinstance(wandb_cfg_dict, dict):
+            raise TypeError("logging.wandb configuration must resolve to a dictionary")
+
+        init_kwargs = {
+            "mode": wandb_cfg_dict.get("mode", "online"),
+            "config": OmegaConf.to_container(self.config, resolve=True),
+        }
+
+        field_mapping = {
+            "project": "project",
+            "entity": "entity",
+            "group": "group",
+            "run_name": "name",
+            "notes": "notes",
+        }
+
+        for source_key, target_key in field_mapping.items():
+            value = wandb_cfg_dict.get(source_key)
+            if value:
+                init_kwargs[target_key] = value
+
+        tags = wandb_cfg_dict.get("tags")
+        if tags:
+            init_kwargs["tags"] = list(tags)
+
+        self.wandb_run = wandb.init(**init_kwargs)
+        self._wandb = wandb
+        self.use_wandb = True
+
+        watch_cfg = wandb_cfg_dict.get("watch") or {}
+        log_mode = str(watch_cfg.get("log", "gradients")).lower()
+        if log_mode and log_mode != "off":
+            wandb.watch(self.model, log=log_mode, log_freq=int(watch_cfg.get("log_freq", 200)))
+
+        self._wandb_log_visuals = bool(wandb_cfg_dict.get("log_visualizations", False))
+        self._wandb_max_visualizations = int(wandb_cfg_dict.get("max_visualizations", 0) or 0)
+        self._wandb_visualization_interval = max(
+            int(wandb_cfg_dict.get("visualization_interval", 1) or 1),
+            1
+        )
+        self._wandb_log_checkpoints = bool(wandb_cfg_dict.get("log_checkpoints", False))
+
+    @staticmethod
+    def _denormalize_frame(frame: torch.Tensor) -> np.ndarray:
+        """Convert a single normalised frame tensor to a numpy image."""
+
+        mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+        std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+        frame_cpu = frame.detach().cpu() * std + mean
+        frame_cpu = torch.clamp(frame_cpu, 0.0, 1.0)
+        return frame_cpu.permute(1, 2, 0).numpy()
+
+    def _log_wandb_training_visual(self, pixel_values: torch.Tensor, epoch: int, global_step: int) -> None:
+        """Log a representative training frame to wandb."""
+
+        if not self.use_wandb or not self._wandb_log_visuals or self._wandb is None:
+            return
+
+        if self._wandb_max_visualizations and self._wandb_visualizations >= self._wandb_max_visualizations:
+            return
+
+        sample = pixel_values[0]
+        mid_index = sample.shape[0] // 2
+        frame_np = self._denormalize_frame(sample[mid_index])
+        caption = f"epoch={epoch}, step={global_step}"
+        wandb_module = self._wandb
+        if wandb_module is None:
+            return
+
+        wandb_module.log(
+            {"train/sample_frame": wandb_module.Image(frame_np, caption=caption)},
+            step=global_step
+        )
+        self._wandb_visualizations += 1
 
     def _generate_mask(self, batch_size: int, num_patches: int) -> torch.Tensor:
         """Generate tube masking for VideoMAE"""
@@ -202,6 +314,27 @@ class VideoMAETrainer:
             if batch_idx % self.config.logging.log_interval == 0:
                 self.writer.add_scalar('train/loss', loss.item(), global_step)
                 self.writer.add_scalar('train/lr', self.optimizer.param_groups[0]['lr'], global_step)
+                if self.use_wandb and self._wandb is not None:
+                    self._wandb.log(
+                        {
+                            'train/loss': loss.item(),
+                            'train/lr': self.optimizer.param_groups[0]['lr'],
+                            'epoch': epoch,
+                        },
+                        step=global_step
+                    )
+
+            if (
+                self.use_wandb
+                and self._wandb_log_visuals
+                and epoch % self._wandb_visualization_interval == 0
+                and batch_idx == 0
+            ):
+                self._log_wandb_training_visual(pixel_values.detach(), epoch, global_step)
+
+        epoch_step = epoch * self.steps_per_epoch
+        if self.use_wandb and self._wandb is not None:
+            self._wandb.log({'train/epoch_loss': losses.avg, 'epoch': epoch}, step=epoch_step)
 
         return losses.avg
 
@@ -245,6 +378,10 @@ class VideoMAETrainer:
         # Log to tensorboard
         self.writer.add_scalar('val/loss', losses.avg, epoch)
 
+        if self.use_wandb and self._wandb is not None:
+            epoch_step = epoch * self.steps_per_epoch
+            self._wandb.log({'val/loss': losses.avg, 'epoch': epoch}, step=epoch_step)
+
         return losses.avg
 
     def train(self) -> None:
@@ -275,6 +412,11 @@ class VideoMAETrainer:
                         os.path.join(self.checkpoint_dir, 'best_model.pth')
                     )
                     print(f"Saved best model with val loss: {val_loss:.4f}")
+                    if self.use_wandb and self._wandb is not None:
+                        epoch_step = epoch * self.steps_per_epoch
+                        self._wandb.log({'val/best_loss': val_loss, 'epoch': epoch}, step=epoch_step)
+                        if self._wandb_log_checkpoints and hasattr(self._wandb, 'save'):
+                            self._wandb.save(os.path.join(self.checkpoint_dir, 'best_model.pth'))
 
             # Save checkpoint
             if epoch % self.config.training.save_interval == 0:
@@ -285,9 +427,22 @@ class VideoMAETrainer:
                     train_loss,
                     os.path.join(self.checkpoint_dir, f'checkpoint_epoch_{epoch}.pth')
                 )
+                if (
+                    self.use_wandb
+                    and self._wandb is not None
+                    and self._wandb_log_checkpoints
+                    and hasattr(self._wandb, 'save')
+                ):
+                    self._wandb.save(os.path.join(self.checkpoint_dir, f'checkpoint_epoch_{epoch}.pth'))
 
         print("Training completed!")
         self.writer.close()
+        if self.use_wandb and self.wandb_run is not None:
+            summary = getattr(self.wandb_run, 'summary', None)
+            if summary is not None:
+                summary['best_val_loss'] = float(self.best_val_loss)
+        if self.use_wandb and self._wandb is not None:
+            self._wandb.finish()
 
 
 @hydra.main(config_path="conf", config_name="config", version_base="1.3")

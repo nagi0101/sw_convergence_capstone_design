@@ -4,3 +4,4 @@ checkpoint_dir: ${hydra:runtime.output_dir}/checkpoints
 tensorboard_dir: ${hydra:runtime.output_dir}/tensorboard
 visualization_dir: ${hydra:runtime.output_dir}/visualizations
 results_file: ${hydra:runtime.output_dir}/evaluation.yaml
+artifacts_dir: ${hydra:runtime.output_dir}/artifacts

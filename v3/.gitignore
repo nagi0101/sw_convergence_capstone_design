@@ -32,7 +32,6 @@ tensorboard/
 wandb/
 
 # Dataset
-data/
 *.png
 *.jpg
 *.jpeg

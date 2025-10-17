@@ -1,4 +1,5 @@
 @echo off
+setlocal ENABLEDELAYEDEXPANSION
 echo Starting VideoMAE Baseline Evaluation...
 echo.
 
@@ -25,9 +26,28 @@ if not exist "results\checkpoints\best_model.pth" (
     exit /b 1
 )
 
+REM Parse optional --wandb flag and forward remaining Hydra overrides
+set "ENABLE_WANDB=0"
+set "CMD_ARGS= evaluation.checkpoint_path=results\checkpoints\best_model.pth"
+
+:parse_args
+if "%1"=="" goto args_done
+if /I "%1"=="--wandb" (
+    set "ENABLE_WANDB=1"
+) else (
+    set "CMD_ARGS=!CMD_ARGS! %1"
+)
+shift
+goto parse_args
+
+:args_done
+if "%ENABLE_WANDB%"=="1" (
+    set "CMD_ARGS=!CMD_ARGS! logging.wandb.enable=true"
+)
+
 REM Run evaluation
 echo Starting evaluation...
-python evaluate.py evaluation.checkpoint_path=results\checkpoints\best_model.pth
+python evaluate.py !CMD_ARGS!
 
 REM Check if evaluation completed successfully
 if errorlevel 1 (
@@ -38,4 +58,5 @@ if errorlevel 1 (
 )
 
 echo.
+endlocal
 pause

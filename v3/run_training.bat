@@ -1,4 +1,5 @@
 @echo off
+setlocal ENABLEDELAYEDEXPANSION
 echo Starting VideoMAE Baseline Training...
 echo.
 
@@ -17,9 +18,28 @@ if errorlevel 1 (
 echo Virtual environment activated.
 echo.
 
+REM Parse optional --wandb flag and forward remaining Hydra overrides
+set "ENABLE_WANDB=0"
+set "CMD_ARGS="
+
+:parse_args
+if "%1"=="" goto args_done
+if /I "%1"=="--wandb" (
+    set "ENABLE_WANDB=1"
+) else (
+    set "CMD_ARGS=!CMD_ARGS! %1"
+)
+shift
+goto parse_args
+
+:args_done
+if "%ENABLE_WANDB%"=="1" (
+    set "CMD_ARGS=!CMD_ARGS! logging.wandb.enable=true"
+)
+
 REM Run training
 echo Starting training with Hydra defaults...
-python train.py
+python train.py !CMD_ARGS!
 
 REM Example override usage (uncomment to customize)
 REM python train.py training.batch_size=16 data.num_frames=32
@@ -32,4 +52,5 @@ if errorlevel 1 (
 )
 
 echo.
+endlocal
 pause
