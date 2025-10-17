@@ -17,3 +17,18 @@ wandb:
     log_visualizations: true
     visualization_interval: 1
     max_visualizations: 4
+
+# Reconstruction visualization settings
+reconstruction_vis:
+    enable: true
+    interval: 1 # Every epoch
+    num_samples: 5 # Number of fixed samples to track
+    metrics:
+        - psnr
+        - ssim
+        - mse
+        - mae
+    visualizations:
+        - comparison_grid # Original/Masked/Recon/Diff
+        - temporal_sequence # Full temporal sequence
+        - error_heatmap # Error heatmap

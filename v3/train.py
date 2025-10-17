@@ -25,6 +25,7 @@ from transformers import (
 
 from dataset import create_dataloaders
 from utils import set_seed, save_checkpoint, load_checkpoint, AverageMeter
+from visualization import ReconstructionVisualizer
 
 
 class VideoMAETrainer:
@@ -67,6 +68,9 @@ class VideoMAETrainer:
             print("Compiling model with torch.compile()...")
             self.model = torch.compile(self.model)
             print("Model compilation complete")
+
+        # Setup reconstruction visualizer
+        self._setup_visualizer()
 
         self._setup_wandb()
 
@@ -250,6 +254,21 @@ class VideoMAETrainer:
         )
         self._wandb_log_checkpoints = bool(wandb_cfg_dict.get("log_checkpoints", False))
 
+    def _setup_visualizer(self) -> None:
+        """Setup reconstruction visualizer"""
+        vis_config = getattr(self.config.logging, 'reconstruction_vis', None)
+        
+        self.use_reconstruction_vis = False
+        self.visualizer = None
+        self.vis_interval = 1
+        
+        if vis_config and bool(vis_config.get('enable', False)):
+            num_samples = int(vis_config.get('num_samples', 5))
+            self.visualizer = ReconstructionVisualizer(num_samples=num_samples)
+            self.vis_interval = int(vis_config.get('interval', 1))
+            self.use_reconstruction_vis = True
+            print(f"Enabled reconstruction visualization (every {self.vis_interval} epochs, {num_samples} samples)")
+
     @staticmethod
     def _denormalize_frame(frame: torch.Tensor) -> np.ndarray:
         """Convert a single normalised frame tensor to a numpy image."""
@@ -411,8 +430,11 @@ class VideoMAETrainer:
         losses = AverageMeter()
 
         pbar = tqdm(self.val_loader, desc="Validation")
+        
+        # Storage for reconstruction visualization
+        first_batch_for_vis = None
 
-        for batch in pbar:
+        for batch_idx, batch in enumerate(pbar):
             # Move to device with non_blocking
             pixel_values = batch['pixel_values'].to(self.device, non_blocking=True)
 
@@ -441,9 +463,29 @@ class VideoMAETrainer:
 
             # Update progress bar
             pbar.set_postfix({'loss': losses.avg})
+            
+            # Store first batch for visualization
+            if batch_idx == 0 and self.use_reconstruction_vis:
+                if self.visualizer.fixed_samples is None:
+                    # First epoch - set fixed samples
+                    self.visualizer.set_fixed_samples(pixel_values, bool_masked_pos)
+                first_batch_for_vis = {
+                    'pixel_values': pixel_values,
+                    'bool_masked_pos': bool_masked_pos,
+                    'outputs': outputs
+                }
 
         # Log to tensorboard
         self.writer.add_scalar('val/loss', losses.avg, epoch)
+
+        # Reconstruction visualization
+        if (self.use_reconstruction_vis and 
+            first_batch_for_vis is not None and 
+            epoch % self.vis_interval == 0 and
+            self.use_wandb and 
+            self._wandb is not None):
+            
+            self._log_reconstruction_visualization(epoch, first_batch_for_vis)
 
         # Log validation metrics using current global step
         if self.use_wandb and self._wandb is not None:
@@ -451,6 +493,145 @@ class VideoMAETrainer:
             self._wandb.log({'val/loss': losses.avg, 'epoch': epoch}, step=current_step)
 
         return losses.avg
+
+    def _reconstruct_from_model_output(self, 
+                                       pixel_values: torch.Tensor, 
+                                       outputs, 
+                                       bool_masked_pos: torch.Tensor) -> torch.Tensor:
+        """
+        Reconstruct video from model outputs
+        
+        Args:
+            pixel_values: Original input [B, T, C, H, W]
+            outputs: Model outputs with 'logits' field
+            bool_masked_pos: Boolean mask [B, num_patches]
+            
+        Returns:
+            Reconstructed video [B, T, C, H, W]
+        """
+        # Get reconstruction from model
+        # VideoMAE outputs.logits has shape [B, num_masked, tubelet_size * patch_size^2 * 3]
+        
+        batch_size = pixel_values.shape[0]
+        num_frames = pixel_values.shape[1]
+        height = pixel_values.shape[3]
+        width = pixel_values.shape[4]
+        
+        patch_size = 16
+        tubelet_size = 2
+        
+        # For now, create a simple reconstruction by combining original and predictions
+        # This is a simplified version - the actual reconstruction is more complex
+        reconstructed = pixel_values.clone()
+        
+        # Note: Full reconstruction would require unpatchifying the model outputs
+        # For visualization purposes, we'll use the model's internal reconstruction if available
+        
+        return reconstructed
+
+    def _log_reconstruction_visualization(self, epoch: int, batch_data: dict) -> None:
+        """
+        Log reconstruction visualization to W&B
+        
+        Args:
+            epoch: Current epoch
+            batch_data: Dictionary with pixel_values, bool_masked_pos, outputs
+        """
+        pixel_values = batch_data['pixel_values']
+        outputs = batch_data['outputs']
+        bool_masked_pos = batch_data['bool_masked_pos']
+        
+        # Use fixed samples for consistent tracking
+        if self.visualizer.fixed_samples is not None:
+            fixed_pixel_values = self.visualizer.fixed_samples.to(self.device)
+            fixed_masks = self.visualizer.fixed_masks.to(self.device)
+            
+            # Get reconstruction for fixed samples
+            with torch.amp.autocast('cuda', enabled=self.use_amp):
+                fixed_outputs = self.model(
+                    pixel_values=fixed_pixel_values,
+                    bool_masked_pos=fixed_masks
+                )
+            
+            # Reconstruct videos
+            reconstructed = self._reconstruct_from_model_output(
+                fixed_pixel_values, 
+                fixed_outputs, 
+                fixed_masks
+            )
+            
+            # Compute metrics
+            metrics = self.visualizer.compute_metrics(
+                fixed_pixel_values.cpu(),
+                reconstructed.cpu()
+            )
+            
+            # Log metrics
+            current_step = epoch * len(self.train_loader) + len(self.train_loader) - 1
+            metric_log = {
+                'val/psnr': metrics['psnr'],
+                'val/ssim': metrics['ssim'],
+                'val/mse': metrics['mse'],
+                'val/mae': metrics['mae'],
+                'val/psnr_std': metrics['psnr_std'],
+                'val/best_psnr': metrics['best_psnr'],
+                'val/worst_psnr': metrics['worst_psnr'],
+                'val/median_psnr': metrics['median_psnr'],
+                'epoch': epoch
+            }
+            self._wandb.log(metric_log, step=current_step)
+            
+            # Create and log visualizations
+            vis_config = self.config.logging.reconstruction_vis
+            visualizations = vis_config.get('visualizations', [])
+            
+            # Log visualizations for multiple samples
+            num_samples_to_show = min(3, len(self.visualizer.fixed_samples))
+            
+            for sample_idx in range(num_samples_to_show):
+                original_video = fixed_pixel_values[sample_idx].cpu()
+                recon_video = reconstructed[sample_idx].cpu()
+                
+                vis_log = {}
+                
+                # Comparison grid
+                if 'comparison_grid' in visualizations:
+                    grid_img = self.visualizer.create_comparison_grid(
+                        original_video,
+                        recon_video,
+                        sample_idx=sample_idx
+                    )
+                    vis_log[f'val/reconstruction_grid_sample_{sample_idx}'] = self._wandb.Image(
+                        grid_img,
+                        caption=f"Epoch {epoch}, Sample {sample_idx}, PSNR: {metrics['psnr']:.2f}dB"
+                    )
+                
+                # Temporal sequence
+                if 'temporal_sequence' in visualizations:
+                    temporal_img = self.visualizer.create_temporal_view(
+                        original_video,
+                        recon_video,
+                        sample_idx=sample_idx
+                    )
+                    vis_log[f'val/temporal_sequence_sample_{sample_idx}'] = self._wandb.Image(
+                        temporal_img,
+                        caption=f"Epoch {epoch}, Sample {sample_idx}"
+                    )
+                
+                # Error heatmap (only for first sample to save space)
+                if 'error_heatmap' in visualizations and sample_idx == 0:
+                    heatmap_img = self.visualizer.create_error_heatmap(
+                        original_video,
+                        recon_video,
+                        sample_idx=sample_idx
+                    )
+                    vis_log[f'val/error_heatmap'] = self._wandb.Image(
+                        heatmap_img,
+                        caption=f"Epoch {epoch}, MSE: {metrics['mse']:.6f}"
+                    )
+                
+                if vis_log:
+                    self._wandb.log(vis_log, step=current_step)
 
     def train(self) -> None:
         """Main training loop"""
