@@ -147,7 +147,9 @@ def create_dataloaders(
     batch_size: int = 8,
     num_workers: int = 4,
     num_frames: int = 16,
-    image_size: int = 224
+    image_size: int = 224,
+    persistent_workers: bool = False,
+    prefetch_factor: Optional[int] = None
 ) -> Tuple[DataLoader, DataLoader, DataLoader]:
     """Create train, val, and test dataloaders"""
 
@@ -178,7 +180,9 @@ def create_dataloaders(
         shuffle=True,
         num_workers=num_workers,
         pin_memory=True,
-        drop_last=True
+        drop_last=True,
+        persistent_workers=persistent_workers if num_workers > 0 else False,
+        prefetch_factor=prefetch_factor if num_workers > 0 else None
     )
 
     val_loader = DataLoader(
@@ -186,7 +190,9 @@ def create_dataloaders(
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
-        pin_memory=True
+        pin_memory=True,
+        persistent_workers=persistent_workers if num_workers > 0 else False,
+        prefetch_factor=prefetch_factor if num_workers > 0 else None
     )
 
     test_loader = DataLoader(
@@ -194,7 +200,9 @@ def create_dataloaders(
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
-        pin_memory=True
+        pin_memory=True,
+        persistent_workers=persistent_workers if num_workers > 0 else False,
+        prefetch_factor=prefetch_factor if num_workers > 0 else None
     )
 
     return train_loader, val_loader, test_loader

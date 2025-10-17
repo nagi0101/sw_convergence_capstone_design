@@ -61,6 +61,13 @@ class VideoMAETrainer:
 
         self.steps_per_epoch = max(len(self.train_loader), 1)
 
+        # Setup torch.compile if requested
+        use_compile = getattr(self.config.training, 'use_compile', False)
+        if use_compile and hasattr(torch, 'compile'):
+            print("Compiling model with torch.compile()...")
+            self.model = torch.compile(self.model)
+            print("Model compilation complete")
+
         self._setup_wandb()
 
     def _setup_model(self) -> None:
@@ -111,21 +118,40 @@ class VideoMAETrainer:
     def _setup_data(self) -> None:
         """Setup data loaders"""
         data_root = to_absolute_path(self.config.data.data_root)
+        
+        # Get DataLoader optimization settings
+        persistent_workers = getattr(self.config.data, 'persistent_workers', False)
+        prefetch_factor = getattr(self.config.data, 'prefetch_factor', None)
+        
         self.train_loader, self.val_loader, self.test_loader = create_dataloaders(
             data_root=data_root,
             batch_size=self.config.training.batch_size,
             num_workers=self.config.data.num_workers,
             num_frames=self.config.data.num_frames,
-            image_size=self.config.data.image_size
+            image_size=self.config.data.image_size,
+            persistent_workers=persistent_workers,
+            prefetch_factor=prefetch_factor
         )
 
     def _setup_training(self) -> None:
         """Setup optimizer and scheduler"""
+        # Check if fused optimizer is available and requested
+        use_fused = getattr(self.config.training, 'fused_optimizer', False)
+        fused_available = 'fused' in torch.optim.AdamW.__init__.__code__.co_varnames
+        
+        optimizer_kwargs = {
+            'lr': self.config.training.learning_rate,
+            'betas': (0.9, 0.95),
+            'weight_decay': self.config.training.weight_decay
+        }
+        
+        if use_fused and fused_available and self.device.type == 'cuda':
+            optimizer_kwargs['fused'] = True
+            print("Using fused AdamW optimizer")
+        
         self.optimizer = AdamW(
             self.model.parameters(),
-            lr=self.config.training.learning_rate,
-            betas=(0.9, 0.95),
-            weight_decay=self.config.training.weight_decay
+            **optimizer_kwargs
         )
 
         total_steps = max(len(self.train_loader) * self.config.training.num_epochs, 1)
@@ -134,6 +160,18 @@ class VideoMAETrainer:
             T_max=total_steps,
             eta_min=self.config.training.min_lr
         )
+        
+        # Setup mixed precision training
+        self.use_amp = getattr(self.config.training, 'use_amp', False)
+        self.scaler = torch.cuda.amp.GradScaler() if self.use_amp else None
+        if self.use_amp:
+            print("Using Automatic Mixed Precision (AMP)")
+        
+        # Setup gradient accumulation
+        self.accumulation_steps = getattr(self.config.training, 'accumulation_steps', 1)
+        if self.accumulation_steps > 1:
+            print(f"Using gradient accumulation with {self.accumulation_steps} steps")
+            print(f"Effective batch size: {self.config.training.batch_size * self.accumulation_steps}")
 
     def _setup_wandb(self) -> None:
         """Initialise optional Weights & Biases logging."""
@@ -262,8 +300,8 @@ class VideoMAETrainer:
         pbar = tqdm(self.train_loader, desc=f"Epoch {epoch}/{self.config.training.num_epochs}")
 
         for batch_idx, batch in enumerate(pbar):
-            # Move to device
-            pixel_values = batch['pixel_values'].to(self.device)
+            # Move to device with non_blocking for better performance
+            pixel_values = batch['pixel_values'].to(self.device, non_blocking=True)
 
             # Generate random mask for tube masking
             batch_size = pixel_values.shape[0]
@@ -281,27 +319,42 @@ class VideoMAETrainer:
 
             # Create boolean mask with specified masking ratio
             bool_masked_pos = self._generate_mask(batch_size, num_patches)
-            bool_masked_pos = bool_masked_pos.to(self.device)
+            bool_masked_pos = bool_masked_pos.to(self.device, non_blocking=True)
 
-            # Forward pass
-            outputs = self.model(pixel_values=pixel_values, bool_masked_pos=bool_masked_pos)
-            loss = outputs.loss
+            # Forward pass with mixed precision
+            with torch.cuda.amp.autocast(enabled=self.use_amp):
+                outputs = self.model(pixel_values=pixel_values, bool_masked_pos=bool_masked_pos)
+                loss = outputs.loss
+                # Scale loss for gradient accumulation
+                loss = loss / self.accumulation_steps
 
             # Backward pass
-            self.optimizer.zero_grad()
-            loss.backward()
+            if self.use_amp:
+                self.scaler.scale(loss).backward()
+            else:
+                loss.backward()
 
-            # Gradient clipping
-            if self.config.training.gradient_clip > 0:
-                torch.nn.utils.clip_grad_norm_(
-                    self.model.parameters(),
-                    self.config.training.gradient_clip
-                )
+            # Optimizer step with gradient accumulation
+            if (batch_idx + 1) % self.accumulation_steps == 0:
+                # Gradient clipping
+                if self.config.training.gradient_clip > 0:
+                    if self.use_amp:
+                        self.scaler.unscale_(self.optimizer)
+                    torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(),
+                        self.config.training.gradient_clip
+                    )
 
-            self.optimizer.step()
+                if self.use_amp:
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    self.optimizer.step()
+                
+                self.optimizer.zero_grad()
 
-            # Update metrics
-            losses.update(loss.item(), pixel_values.size(0))
+            # Update metrics (use original loss for logging)
+            losses.update(loss.item() * self.accumulation_steps, pixel_values.size(0))
 
             # Update progress bar
             pbar.set_postfix({
@@ -312,17 +365,23 @@ class VideoMAETrainer:
             # Log to tensorboard
             global_step = epoch * len(self.train_loader) + batch_idx
             if batch_idx % self.config.logging.log_interval == 0:
-                self.writer.add_scalar('train/loss', loss.item(), global_step)
+                self.writer.add_scalar('train/loss', loss.item() * self.accumulation_steps, global_step)
                 self.writer.add_scalar('train/lr', self.optimizer.param_groups[0]['lr'], global_step)
+                
+                # Log GPU memory usage
+                if self.device.type == 'cuda':
+                    gpu_mem_mb = torch.cuda.max_memory_allocated() / 1024**2
+                    self.writer.add_scalar('train/gpu_mem_mb', gpu_mem_mb, global_step)
+                
                 if self.use_wandb and self._wandb is not None:
-                    self._wandb.log(
-                        {
-                            'train/loss': loss.item(),
-                            'train/lr': self.optimizer.param_groups[0]['lr'],
-                            'epoch': epoch,
-                        },
-                        step=global_step
-                    )
+                    log_dict = {
+                        'train/loss': loss.item() * self.accumulation_steps,
+                        'train/lr': self.optimizer.param_groups[0]['lr'],
+                        'epoch': epoch,
+                    }
+                    if self.device.type == 'cuda':
+                        log_dict['train/gpu_mem_mb'] = gpu_mem_mb
+                    self._wandb.log(log_dict, step=global_step)
 
             if (
                 self.use_wandb
@@ -347,8 +406,8 @@ class VideoMAETrainer:
         pbar = tqdm(self.val_loader, desc="Validation")
 
         for batch in pbar:
-            # Move to device
-            pixel_values = batch['pixel_values'].to(self.device)
+            # Move to device with non_blocking
+            pixel_values = batch['pixel_values'].to(self.device, non_blocking=True)
 
             # Generate mask (same as training for consistent evaluation)
             batch_size = pixel_values.shape[0]
@@ -363,11 +422,12 @@ class VideoMAETrainer:
             seq_length = (num_frames // tubelet_size) * ((height // patch_size) * (width // patch_size))
             num_patches = seq_length
             bool_masked_pos = self._generate_mask(batch_size, num_patches)
-            bool_masked_pos = bool_masked_pos.to(self.device)
+            bool_masked_pos = bool_masked_pos.to(self.device, non_blocking=True)
 
-            # Forward pass
-            outputs = self.model(pixel_values=pixel_values, bool_masked_pos=bool_masked_pos)
-            loss = outputs.loss
+            # Forward pass with mixed precision
+            with torch.cuda.amp.autocast(enabled=self.use_amp):
+                outputs = self.model(pixel_values=pixel_values, bool_masked_pos=bool_masked_pos)
+                loss = outputs.loss
 
             # Update metrics
             losses.update(loss.item(), pixel_values.size(0))
