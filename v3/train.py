@@ -106,6 +106,12 @@ class VideoMAETrainer:
             self.model = VideoMAEForPreTraining(model_config)
 
         self.model = self.model.to(self.device)
+        
+        # Enable gradient checkpointing if requested
+        use_grad_checkpoint = getattr(self.config.training, 'gradient_checkpointing', False)
+        if use_grad_checkpoint and hasattr(self.model, 'gradient_checkpointing_enable'):
+            self.model.gradient_checkpointing_enable()
+            print("Enabled gradient checkpointing for memory efficiency")
 
         # Image processor
         self.processor = VideoMAEImageProcessor(

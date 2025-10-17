@@ -1,7 +1,7 @@
-num_epochs: 150
-batch_size: 12
-accumulation_steps: 4
-learning_rate: 0.0002
+num_epochs: 120
+batch_size: 24
+accumulation_steps: 2
+learning_rate: 0.00024
 min_lr: 0.000002
 weight_decay: 0.05
 gradient_clip: 1.0
@@ -15,3 +15,4 @@ resume: null
 use_amp: true
 use_compile: false
 fused_optimizer: true
+gradient_checkpointing: true
