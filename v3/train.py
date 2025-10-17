@@ -169,7 +169,7 @@ class VideoMAETrainer:
         
         # Setup mixed precision training
         self.use_amp = getattr(self.config.training, 'use_amp', False)
-        self.scaler = torch.cuda.amp.GradScaler() if self.use_amp else None
+        self.scaler = torch.amp.GradScaler('cuda') if self.use_amp else None
         if self.use_amp:
             print("Using Automatic Mixed Precision (AMP)")
         
@@ -328,7 +328,7 @@ class VideoMAETrainer:
             bool_masked_pos = bool_masked_pos.to(self.device, non_blocking=True)
 
             # Forward pass with mixed precision
-            with torch.cuda.amp.autocast(enabled=self.use_amp):
+            with torch.amp.autocast('cuda', enabled=self.use_amp):
                 outputs = self.model(pixel_values=pixel_values, bool_masked_pos=bool_masked_pos)
                 loss = outputs.loss
                 # Scale loss for gradient accumulation
@@ -432,7 +432,7 @@ class VideoMAETrainer:
             bool_masked_pos = bool_masked_pos.to(self.device, non_blocking=True)
 
             # Forward pass with mixed precision
-            with torch.cuda.amp.autocast(enabled=self.use_amp):
+            with torch.amp.autocast('cuda', enabled=self.use_amp):
                 outputs = self.model(pixel_values=pixel_values, bool_masked_pos=bool_masked_pos)
                 loss = outputs.loss
 
