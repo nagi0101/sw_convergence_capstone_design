@@ -1,0 +1,15 @@
+defaults:
+    - model: base
+    - data: cpu
+    - training: cpu
+    - evaluation: cpu
+    - logging: base
+    - output: default
+
+hydra:
+    run:
+        dir: ${output.run_dir}
+    sweep:
+        dir: ${output.sweep_dir}
+        subdir: ${hydra.job.num}
+    output_subdir: null

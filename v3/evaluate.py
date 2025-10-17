@@ -4,32 +4,37 @@ Computes PSNR, SSIM, MSE and other metrics
 """
 
 import os
-import argparse
-from pathlib import Path
 import time
 import yaml
-from typing import Dict, Any, Optional
+from typing import Dict
 
 import torch
-import torch.nn as nn
 import numpy as np
 from tqdm import tqdm
 from skimage.metrics import peak_signal_noise_ratio as psnr
 from skimage.metrics import structural_similarity as ssim
 import matplotlib.pyplot as plt
 
+import hydra
+from hydra.utils import to_absolute_path
+from omegaconf import DictConfig
+
 from transformers import VideoMAEForPreTraining, VideoMAEImageProcessor, VideoMAEConfig
 from dataset import create_dataloaders
-from utils import set_seed, load_checkpoint, AverageMeter
+from utils import set_seed, AverageMeter
 
 
 class VideoMAEEvaluator:
     """Evaluator for VideoMAE baseline model"""
 
-    def __init__(self, config: Dict[str, Any], checkpoint_path: str) -> None:
+    def __init__(self, config: DictConfig, checkpoint_path: str) -> None:
         self.config = config
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         print(f"Using device: {self.device}")
+        print(f"Run directory: {os.getcwd()}")
+
+        self.visualization_dir = os.path.abspath(self.config.evaluation.visualization_dir)
+        os.makedirs(self.visualization_dir, exist_ok=True)
 
         # Load model
         self._load_model(checkpoint_path)
@@ -40,10 +45,10 @@ class VideoMAEEvaluator:
     def _load_model(self, checkpoint_path: str) -> None:
         """Load trained model from checkpoint"""
         model_config = VideoMAEConfig(
-            image_size=self.config['data']['image_size'],
+            image_size=self.config.data.image_size,
             patch_size=16,
             num_channels=3,
-            num_frames=self.config['data']['num_frames'],
+            num_frames=self.config.data.num_frames,
             tubelet_size=2,
             hidden_size=768,
             num_hidden_layers=12,
@@ -53,8 +58,8 @@ class VideoMAEEvaluator:
             decoder_hidden_size=384,
             decoder_num_attention_heads=6,
             decoder_intermediate_size=1536,
-            mask_ratio=self.config['model']['mask_ratio'],
-            norm_pix_loss=self.config['model']['norm_pix_loss']
+            mask_ratio=self.config.model.mask_ratio,
+            norm_pix_loss=self.config.model.norm_pix_loss
         )
 
         self.model = VideoMAEForPreTraining(model_config)
@@ -73,24 +78,25 @@ class VideoMAEEvaluator:
         # Image processor
         self.processor = VideoMAEImageProcessor(
             do_resize=True,
-            size={"height": self.config['data']['image_size'],
-                  "width": self.config['data']['image_size']},
+            size={"height": self.config.data.image_size,
+                  "width": self.config.data.image_size},
             do_normalize=True
         )
 
     def _setup_data(self) -> None:
         """Setup test data loader"""
+        data_root = to_absolute_path(self.config.data.data_root)
         _, _, self.test_loader = create_dataloaders(
-            data_root=self.config['data']['data_root'],
-            batch_size=self.config['evaluation']['batch_size'],
-            num_workers=self.config['data']['num_workers'],
-            num_frames=self.config['data']['num_frames'],
-            image_size=self.config['data']['image_size']
+            data_root=data_root,
+            batch_size=self.config.evaluation.batch_size,
+            num_workers=self.config.data.num_workers,
+            num_frames=self.config.data.num_frames,
+            image_size=self.config.data.image_size
         )
 
     def _generate_mask(self, batch_size: int, num_patches: int) -> torch.Tensor:
         """Generate tube masking for VideoMAE"""
-        mask_ratio = self.config['model']['mask_ratio']
+        mask_ratio = self.config.model.mask_ratio
         num_masked = int(num_patches * mask_ratio)
 
         # Create mask for each sample in batch
@@ -179,9 +185,9 @@ class VideoMAEEvaluator:
                 mse_score = np.mean((orig_frame - recon_frame) ** 2)
                 mse_scores.append(mse_score)
 
-        metrics['psnr'] = np.mean(psnr_scores)
-        metrics['ssim'] = np.mean(ssim_scores)
-        metrics['mse'] = np.mean(mse_scores)
+        metrics['psnr'] = float(np.mean(psnr_scores))
+        metrics['ssim'] = float(np.mean(ssim_scores))
+        metrics['mse'] = float(np.mean(mse_scores))
 
         return metrics
 
@@ -226,7 +232,7 @@ class VideoMAEEvaluator:
             })
 
             # Save sample visualizations
-            if batch_idx < self.config['evaluation']['num_visualizations']:
+            if batch_idx < self.config.evaluation.num_visualizations:
                 self.save_visualization(
                     pixel_values[0],
                     reconstruction[0],
@@ -246,6 +252,7 @@ class VideoMAEEvaluator:
         print(f"Inference FPS: {fps:.2f}")
 
         # Measure memory usage
+        memory_mb = 0.0
         if torch.cuda.is_available():
             memory_mb = torch.cuda.max_memory_allocated() / 1024 / 1024
             print(f"GPU Memory: {memory_mb:.2f} MB")
@@ -256,7 +263,7 @@ class VideoMAEEvaluator:
             'ssim': float(all_metrics['ssim'].avg),
             'mse': float(all_metrics['mse'].avg),
             'fps': float(fps),
-            'memory_mb': float(memory_mb) if torch.cuda.is_available() else 0
+            'memory_mb': float(memory_mb)
         }
 
         return results
@@ -293,46 +300,37 @@ class VideoMAEEvaluator:
         axes[1].axis('off')
 
         # Save figure
-        save_path = os.path.join(
-            self.config['evaluation']['visualization_dir'],
-            f'sample_{idx}.png'
-        )
+        save_path = os.path.join(self.visualization_dir, f'sample_{idx}.png')
         plt.savefig(save_path, dpi=100, bbox_inches='tight')
         plt.close()
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description='Evaluate VideoMAE on SMB dataset')
-    parser.add_argument('--config', type=str, default='config.yaml',
-                       help='Path to config file')
-    parser.add_argument('--checkpoint', type=str, required=True,
-                       help='Path to model checkpoint')
-    parser.add_argument('--output', type=str, default='results/evaluation.yaml',
-                       help='Path to save results')
-    args = parser.parse_args()
+@hydra.main(config_path="conf", config_name="config", version_base="1.3")
+def main(cfg: DictConfig) -> None:
+    if not cfg.evaluation.checkpoint_path:
+        raise ValueError("evaluation.checkpoint_path must be provided (e.g., evaluation.checkpoint_path=path/to/best_model.pth)")
 
-    # Load config
-    with open(args.config, 'r') as f:
-        config = yaml.safe_load(f)
-
-    # Create visualization directory
-    os.makedirs(config['evaluation']['visualization_dir'], exist_ok=True)
+    checkpoint_path = to_absolute_path(str(cfg.evaluation.checkpoint_path))
+    if not os.path.exists(checkpoint_path):
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+    results_path = to_absolute_path(str(cfg.evaluation.results_file))
+    os.makedirs(os.path.dirname(results_path), exist_ok=True)
 
     # Set seed
-    set_seed(config['training']['seed'])
+    set_seed(cfg.training.seed)
 
     # Create evaluator
-    evaluator = VideoMAEEvaluator(config, args.checkpoint)
+    evaluator = VideoMAEEvaluator(cfg, checkpoint_path)
 
     # Evaluate
     results = evaluator.evaluate()
 
     # Save results
-    with open(args.output, 'w') as f:
+    with open(results_path, 'w') as f:
         yaml.dump(results, f)
 
-    print(f"\nResults saved to {args.output}")
+    print(f"\nResults saved to {results_path}")
 
 
 if __name__ == "__main__":
-    main()
+    main()  # type: ignore[misc]

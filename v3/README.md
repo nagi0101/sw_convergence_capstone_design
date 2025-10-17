@@ -7,20 +7,21 @@ Standard VideoMAE implementation for performance comparison with v4 HST-MAE.
 This is a baseline implementation of VideoMAE (Video Masked Autoencoders) using Hugging Face Transformers. It serves as a performance benchmark for comparing with the advanced HST-MAE model in v4.
 
 ### Key Features
-- Standard VideoMAE architecture from NeurIPS 2022 paper
-- 90% tube masking for self-supervised learning
-- Pretrained weights from MCG-NJU/videomae-base
-- Evaluation metrics: PSNR, SSIM, MSE, FPS
+
+-   Standard VideoMAE architecture from NeurIPS 2022 paper
+-   90% tube masking for self-supervised learning
+-   Pretrained weights from MCG-NJU/videomae-base
+-   Evaluation metrics: PSNR, SSIM, MSE, FPS
 
 ### Architecture Comparison
 
-| Component | v3 (VideoMAE) | v4 (HST-MAE) |
-|-----------|---------------|--------------|
-| Encoder | Single-scale ViT | Hierarchical Swin |
-| Attention | Global self-attention | Shifted window |
-| Masking | Tube masking (90%) | Dual masking + region-aware |
-| Input | Video frames only | Video + state vectors |
-| Compression | None | RVQ codebook |
+| Component   | v3 (VideoMAE)         | v4 (HST-MAE)                |
+| ----------- | --------------------- | --------------------------- |
+| Encoder     | Single-scale ViT      | Hierarchical Swin           |
+| Attention   | Global self-attention | Shifted window              |
+| Masking     | Tube masking (90%)    | Dual masking + region-aware |
+| Input       | Video frames only     | Video + state vectors       |
+| Compression | None                  | RVQ codebook                |
 
 ## Installation
 
@@ -42,6 +43,7 @@ pip install -r requirements.txt
 ## Dataset Setup
 
 Ensure the SMB dataset is available:
+
 ```
 ../smbdataset/
 └── data-smb/
@@ -50,59 +52,77 @@ Ensure the SMB dataset is available:
     └── ...
 ```
 
+Set the `SMB_DATA_ROOT` environment variable to point elsewhere if the dataset lives in a different location.
+
 ## Usage
 
 ### Training
 
 ```bash
-# Train from scratch
-python train.py --config config.yaml
+# Train with default GPU configuration
+python train.py
 
 # Resume training from checkpoint
-python train.py --config config.yaml --resume results/checkpoints/checkpoint_epoch_100.pth
+python train.py training.resume=results/checkpoints/checkpoint_epoch_100.pth
+
+# CPU-friendly configuration
+python train.py --config-name config_cpu
 ```
 
 ### Evaluation
 
 ```bash
 # Evaluate trained model
-python evaluate.py --config config.yaml --checkpoint results/checkpoints/best_model.pth
+python evaluate.py evaluation.checkpoint_path=results/checkpoints/best_model.pth
 
-# Save evaluation results
-python evaluate.py --config config.yaml --checkpoint results/checkpoints/best_model.pth --output results/evaluation.yaml
+# Override evaluation outputs or batch size as needed
+python evaluate.py evaluation.checkpoint_path=results/checkpoints/best_model.pth evaluation.results_file=results/eval_gpu.yaml evaluation.batch_size=2
 ```
 
 ## Configuration
 
-Edit `config.yaml` to modify training parameters:
+Hydra composes configurations from the files under `conf/`:
 
 ```yaml
-model:
-  pretrained: "MCG-NJU/videomae-base"  # Pretrained model
-  mask_ratio: 0.9                      # 90% masking
-
-training:
-  num_epochs: 200                      # Training epochs
-  batch_size: 8                        # Batch size
-  learning_rate: 1.5e-4                # Learning rate
+# conf/config.yaml
+defaults:
+    - model: base
+    - data: base
+    - training: gpu
+    - evaluation: base
+    - logging: base
+    - output: default
 ```
+
+Each group (e.g., `training/gpu.yaml`, `training/cpu.yaml`) can be swapped at the CLI:
+
+```bash
+# Smaller batches and fewer frames
+python train.py training.batch_size=4 data.num_frames=8
+
+# Switch to CPU preset
+python train.py --config-name config_cpu
+```
+
+Per-run artifacts (checkpoints, TensorBoard logs, visualizations, evaluation summaries) are written under `results/hydra/<timestamp>/` by default. See `conf/output/default.yaml` to customize these locations.
 
 ## Expected Performance
 
 ### Baseline (v3) vs Advanced (v4)
 
 | Metric | VideoMAE (v3) | HST-MAE (v4) | Improvement |
-|--------|---------------|--------------|-------------|
-| PSNR | 33-35 dB | 38.5 dB | +3.5-5.5 dB |
-| SSIM | 0.83-0.87 | 0.94 | +0.07-0.11 |
-| FPS | 100-150 | 85 | -15-65 |
-| Memory | 5-7 GB | 8 GB | +1-3 GB |
+| ------ | ------------- | ------------ | ----------- |
+| PSNR   | 33-35 dB      | 38.5 dB      | +3.5-5.5 dB |
+| SSIM   | 0.83-0.87     | 0.94         | +0.07-0.11  |
+| FPS    | 100-150       | 85           | -15-65      |
+| Memory | 5-7 GB        | 8 GB         | +1-3 GB     |
 
 ### Key Observations
-- **Reconstruction Quality**: Standard VideoMAE shows limitations in complex scenes
-- **Spatial Coherence**: Artifacts at region boundaries
-- **Temporal Consistency**: Frame-to-frame flickering
-- **Computational Efficiency**: Faster inference due to simpler architecture
+
+-   **Reconstruction Quality**: Standard VideoMAE shows limitations in complex scenes
+-   **Spatial Coherence**: Artifacts at region boundaries
+-   **Temporal Consistency**: Frame-to-frame flickering
+-   **Computational Efficiency**: Faster inference due to simpler architecture
 
 ## Project Structure
 
@@ -110,7 +130,7 @@ training:
 v3/
 ├── README.md              # This file
 ├── requirements.txt       # Python dependencies
-├── config.yaml           # Training configuration
+├── conf/                  # Hydra configuration hierarchy
 ├── dataset.py            # SMB dataset loader
 ├── train.py              # Training script
 ├── evaluate.py           # Evaluation script
@@ -124,21 +144,23 @@ v3/
 ## Monitoring Training
 
 ```bash
-# Launch TensorBoard
-tensorboard --logdir results/tensorboard
+# Launch TensorBoard (aggregates run-specific logs)
+tensorboard --logdir results/hydra
 ```
 
 ## Troubleshooting
 
 ### CUDA Out of Memory
-- Reduce `batch_size` in config.yaml
-- Reduce `num_frames` from 16 to 8
-- Use gradient accumulation
+
+-   Reduce `batch_size` in config.yaml
+-   Reduce `num_frames` from 16 to 8
+-   Use gradient accumulation
 
 ### Slow Data Loading
-- Increase `num_workers` in config.yaml
-- Ensure data is on SSD
-- Use smaller `image_size` (e.g., 112 instead of 224)
+
+-   Increase `num_workers` in config.yaml
+-   Ensure data is on SSD
+-   Use smaller `image_size` (e.g., 112 instead of 224)
 
 ## Citation
 

@@ -18,8 +18,11 @@ echo Virtual environment activated.
 echo.
 
 REM Run training
-echo Starting training with config.yaml...
-python train.py --config config.yaml
+echo Starting training with Hydra defaults...
+python train.py
+
+REM Example override usage (uncomment to customize)
+REM python train.py training.batch_size=16 data.num_frames=32
 
 REM Check if training completed successfully
 if errorlevel 1 (

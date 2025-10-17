@@ -4,16 +4,16 @@ Uses Hugging Face Transformers implementation
 """
 
 import os
-import argparse
-import yaml
-from typing import Dict, Any, Tuple, Optional, Union
 
 import torch
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.tensorboard import SummaryWriter
-from torch.utils.data import DataLoader
 from tqdm import tqdm
+
+import hydra
+from hydra.utils import to_absolute_path
+from omegaconf import DictConfig
 
 from transformers import (
     VideoMAEForPreTraining,
@@ -28,10 +28,11 @@ from utils import set_seed, save_checkpoint, load_checkpoint, AverageMeter
 class VideoMAETrainer:
     """Trainer for VideoMAE baseline model"""
 
-    def __init__(self, config: Dict[str, Any]) -> None:
+    def __init__(self, config: DictConfig) -> None:
         self.config = config
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         print(f"Using device: {self.device}")
+        print(f"Run directory: {os.getcwd()}")
 
         if self.device.type == 'cpu':
             print("WARNING: Training on CPU will be very slow! Consider using a GPU.")
@@ -47,30 +48,34 @@ class VideoMAETrainer:
         self._setup_training()
 
         # Setup logging
-        self.writer = SummaryWriter(log_dir=config['logging']['tensorboard_dir'])
+        tensorboard_dir = os.path.abspath(self.config.logging.tensorboard_dir)
+        os.makedirs(tensorboard_dir, exist_ok=True)
+        self.writer = SummaryWriter(log_dir=tensorboard_dir)
         self.best_val_loss = float('inf')
+        self.checkpoint_dir = os.path.abspath(self.config.training.checkpoint_dir)
+        os.makedirs(self.checkpoint_dir, exist_ok=True)
 
     def _setup_model(self) -> None:
         """Initialize VideoMAE model"""
 
         # Load pretrained model or create new
-        if self.config['model']['pretrained']:
-            print(f"Loading pretrained model: {self.config['model']['pretrained']}")
+        if self.config.model.pretrained:
+            print(f"Loading pretrained model: {self.config.model.pretrained}")
             # Load the pretrained model with its original config
             self.model = VideoMAEForPreTraining.from_pretrained(
-                self.config['model']['pretrained'],
+                self.config.model.pretrained,
                 ignore_mismatched_sizes=True
             )
             # Update mask ratio if needed
-            self.model.config.mask_ratio = self.config['model']['mask_ratio']
-            self.model.config.norm_pix_loss = self.config['model']['norm_pix_loss']
+            self.model.config.mask_ratio = self.config.model.mask_ratio
+            self.model.config.norm_pix_loss = self.config.model.norm_pix_loss
         else:
             print("Creating new model from scratch")
             model_config = VideoMAEConfig(
-                image_size=self.config['data']['image_size'],
+                image_size=self.config.data.image_size,
                 patch_size=16,
                 num_channels=3,
-                num_frames=self.config['data']['num_frames'],
+                num_frames=self.config.data.num_frames,
                 tubelet_size=2,
                 hidden_size=768,
                 num_hidden_layers=12,
@@ -80,8 +85,8 @@ class VideoMAETrainer:
                 decoder_hidden_size=384,
                 decoder_num_attention_heads=6,
                 decoder_intermediate_size=1536,
-                mask_ratio=self.config['model']['mask_ratio'],
-                norm_pix_loss=self.config['model']['norm_pix_loss']
+                mask_ratio=self.config.model.mask_ratio,
+                norm_pix_loss=self.config.model.norm_pix_loss
             )
             self.model = VideoMAEForPreTraining(model_config)
 
@@ -90,40 +95,41 @@ class VideoMAETrainer:
         # Image processor
         self.processor = VideoMAEImageProcessor(
             do_resize=True,
-            size={"height": self.config['data']['image_size'],
-                  "width": self.config['data']['image_size']},
+            size={"height": self.config.data.image_size,
+                  "width": self.config.data.image_size},
             do_normalize=True
         )
 
     def _setup_data(self) -> None:
         """Setup data loaders"""
+        data_root = to_absolute_path(self.config.data.data_root)
         self.train_loader, self.val_loader, self.test_loader = create_dataloaders(
-            data_root=self.config['data']['data_root'],
-            batch_size=self.config['training']['batch_size'],
-            num_workers=self.config['data']['num_workers'],
-            num_frames=self.config['data']['num_frames'],
-            image_size=self.config['data']['image_size']
+            data_root=data_root,
+            batch_size=self.config.training.batch_size,
+            num_workers=self.config.data.num_workers,
+            num_frames=self.config.data.num_frames,
+            image_size=self.config.data.image_size
         )
 
     def _setup_training(self) -> None:
         """Setup optimizer and scheduler"""
         self.optimizer = AdamW(
             self.model.parameters(),
-            lr=self.config['training']['learning_rate'],
+            lr=self.config.training.learning_rate,
             betas=(0.9, 0.95),
-            weight_decay=self.config['training']['weight_decay']
+            weight_decay=self.config.training.weight_decay
         )
 
-        total_steps = len(self.train_loader) * self.config['training']['num_epochs']
+        total_steps = max(len(self.train_loader) * self.config.training.num_epochs, 1)
         self.scheduler = CosineAnnealingLR(
             self.optimizer,
             T_max=total_steps,
-            eta_min=self.config['training']['min_lr']
+            eta_min=self.config.training.min_lr
         )
 
     def _generate_mask(self, batch_size: int, num_patches: int) -> torch.Tensor:
         """Generate tube masking for VideoMAE"""
-        mask_ratio = self.config['model']['mask_ratio']
+        mask_ratio = self.config.model.mask_ratio
         num_masked = int(num_patches * mask_ratio)
 
         # Create mask for each sample in batch
@@ -141,7 +147,7 @@ class VideoMAETrainer:
         self.model.train()
         losses = AverageMeter()
 
-        pbar = tqdm(self.train_loader, desc=f"Epoch {epoch}/{self.config['training']['num_epochs']}")
+        pbar = tqdm(self.train_loader, desc=f"Epoch {epoch}/{self.config.training.num_epochs}")
 
         for batch_idx, batch in enumerate(pbar):
             # Move to device
@@ -174,10 +180,10 @@ class VideoMAETrainer:
             loss.backward()
 
             # Gradient clipping
-            if self.config['training']['gradient_clip'] > 0:
+            if self.config.training.gradient_clip > 0:
                 torch.nn.utils.clip_grad_norm_(
                     self.model.parameters(),
-                    self.config['training']['gradient_clip']
+                    self.config.training.gradient_clip
                 )
 
             self.optimizer.step()
@@ -193,7 +199,7 @@ class VideoMAETrainer:
 
             # Log to tensorboard
             global_step = epoch * len(self.train_loader) + batch_idx
-            if batch_idx % self.config['logging']['log_interval'] == 0:
+            if batch_idx % self.config.logging.log_interval == 0:
                 self.writer.add_scalar('train/loss', loss.item(), global_step)
                 self.writer.add_scalar('train/lr', self.optimizer.param_groups[0]['lr'], global_step)
 
@@ -243,9 +249,9 @@ class VideoMAETrainer:
 
     def train(self) -> None:
         """Main training loop"""
-        print(f"Starting training for {self.config['training']['num_epochs']} epochs")
+        print(f"Starting training for {self.config.training.num_epochs} epochs")
 
-        for epoch in range(1, self.config['training']['num_epochs'] + 1):
+        for epoch in range(1, self.config.training.num_epochs + 1):
             # Train
             train_loss = self.train_epoch(epoch)
             print(f"Epoch {epoch} - Train Loss: {train_loss:.4f}")
@@ -254,7 +260,7 @@ class VideoMAETrainer:
             self.scheduler.step()
 
             # Validate
-            if epoch % self.config['training']['val_interval'] == 0:
+            if epoch % self.config.training.val_interval == 0:
                 val_loss = self.validate(epoch)
                 print(f"Epoch {epoch} - Val Loss: {val_loss:.4f}")
 
@@ -266,45 +272,36 @@ class VideoMAETrainer:
                         self.optimizer,
                         epoch,
                         val_loss,
-                        os.path.join(self.config['training']['checkpoint_dir'], 'best_model.pth')
+                        os.path.join(self.checkpoint_dir, 'best_model.pth')
                     )
                     print(f"Saved best model with val loss: {val_loss:.4f}")
 
             # Save checkpoint
-            if epoch % self.config['training']['save_interval'] == 0:
+            if epoch % self.config.training.save_interval == 0:
                 save_checkpoint(
                     self.model,
                     self.optimizer,
                     epoch,
                     train_loss,
-                    os.path.join(self.config['training']['checkpoint_dir'], f'checkpoint_epoch_{epoch}.pth')
+                    os.path.join(self.checkpoint_dir, f'checkpoint_epoch_{epoch}.pth')
                 )
 
         print("Training completed!")
         self.writer.close()
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description='Train VideoMAE on SMB dataset')
-    parser.add_argument('--config', type=str, default='config.yaml',
-                       help='Path to config file')
-    parser.add_argument('--resume', type=str, default=None,
-                       help='Path to checkpoint to resume from')
-    args = parser.parse_args()
-
-    # Load config
-    with open(args.config, 'r') as f:
-        config = yaml.safe_load(f)
-
+@hydra.main(config_path="conf", config_name="config", version_base="1.3")
+def main(cfg: DictConfig) -> None:
     # Set seed
-    set_seed(config['training']['seed'])
+    set_seed(cfg.training.seed)
 
     # Create trainer
-    trainer = VideoMAETrainer(config)
+    trainer = VideoMAETrainer(cfg)
 
     # Resume if specified
-    if args.resume:
-        checkpoint = load_checkpoint(args.resume, trainer.model, trainer.optimizer)
+    if cfg.training.resume:
+        resume_path = to_absolute_path(str(cfg.training.resume))
+        checkpoint = load_checkpoint(resume_path, trainer.model, trainer.optimizer)
         print(f"Resumed from epoch {checkpoint['epoch']}")
 
     # Train
@@ -312,4 +309,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    main()  # type: ignore[misc]

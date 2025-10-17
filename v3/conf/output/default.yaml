@@ -1,0 +1,6 @@
+run_dir: ${hydra:runtime.cwd}/results/hydra/${now:%Y%m%d_%H%M%S}
+sweep_dir: ${hydra:runtime.cwd}/results/hydra/multirun
+checkpoint_dir: ${hydra:runtime.output_dir}/checkpoints
+tensorboard_dir: ${hydra:runtime.output_dir}/tensorboard
+visualization_dir: ${hydra:runtime.output_dir}/visualizations
+results_file: ${hydra:runtime.output_dir}/evaluation.yaml

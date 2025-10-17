@@ -1,0 +1,5 @@
+batch_size: 4
+num_visualizations: 10
+visualization_dir: ${output.visualization_dir}
+results_file: ${output.results_file}
+checkpoint_path: null

@@ -21,8 +21,8 @@ echo Virtual environment activated.
 echo.
 
 REM Run training with CPU config
-echo Starting training with config_cpu.yaml...
-python train.py --config config_cpu.yaml
+echo Starting training with Hydra CPU configuration...
+python train.py --config-name config_cpu
 
 REM Check if training completed successfully
 if errorlevel 1 (

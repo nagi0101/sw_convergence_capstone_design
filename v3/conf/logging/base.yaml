@@ -1,0 +1,2 @@
+tensorboard_dir: ${output.tensorboard_dir}
+log_interval: 10

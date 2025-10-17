@@ -27,7 +27,7 @@ if not exist "results\checkpoints\best_model.pth" (
 
 REM Run evaluation
 echo Starting evaluation...
-python evaluate.py --config config.yaml --checkpoint results\checkpoints\best_model.pth --output results\evaluation.yaml
+python evaluate.py evaluation.checkpoint_path=results\checkpoints\best_model.pth
 
 REM Check if evaluation completed successfully
 if errorlevel 1 (
