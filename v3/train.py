@@ -397,9 +397,10 @@ class VideoMAETrainer:
             ):
                 self._log_wandb_training_visual(pixel_values.detach(), epoch, global_step)
 
-        epoch_step = epoch * self.steps_per_epoch
+        # Log epoch metrics using the last global_step
+        final_step = epoch * len(self.train_loader) + len(self.train_loader) - 1
         if self.use_wandb and self._wandb is not None:
-            self._wandb.log({'train/epoch_loss': losses.avg, 'epoch': epoch}, step=epoch_step)
+            self._wandb.log({'train/epoch_loss': losses.avg, 'epoch': epoch}, step=final_step)
 
         return losses.avg
 
@@ -444,9 +445,10 @@ class VideoMAETrainer:
         # Log to tensorboard
         self.writer.add_scalar('val/loss', losses.avg, epoch)
 
+        # Log validation metrics using current global step
         if self.use_wandb and self._wandb is not None:
-            epoch_step = epoch * self.steps_per_epoch
-            self._wandb.log({'val/loss': losses.avg, 'epoch': epoch}, step=epoch_step)
+            current_step = epoch * len(self.train_loader) + len(self.train_loader) - 1
+            self._wandb.log({'val/loss': losses.avg, 'epoch': epoch}, step=current_step)
 
         return losses.avg
 
@@ -479,8 +481,8 @@ class VideoMAETrainer:
                     )
                     print(f"Saved best model with val loss: {val_loss:.4f}")
                     if self.use_wandb and self._wandb is not None:
-                        epoch_step = epoch * self.steps_per_epoch
-                        self._wandb.log({'val/best_loss': val_loss, 'epoch': epoch}, step=epoch_step)
+                        current_step = epoch * len(self.train_loader) + len(self.train_loader) - 1
+                        self._wandb.log({'val/best_loss': val_loss, 'epoch': epoch}, step=current_step)
                         if self._wandb_log_checkpoints and hasattr(self._wandb, 'save'):
                             self._wandb.save(os.path.join(self.checkpoint_dir, 'best_model.pth'))
 
