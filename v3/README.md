@@ -23,35 +23,38 @@ This is a baseline implementation of VideoMAE (Video Masked Autoencoders) using 
 | Input       | Video frames only     | Video + state vectors       |
 | Compression | None                  | RVQ codebook                |
 
-## Installation
+## Installation (Linux, Conda-first)
 
 ```bash
-# 1. Create virtual environment
+# 0. Install miniconda or mambaforge before proceeding.
+
+# 1. Create and activate a dedicated environment
 cd v3
-python -m venv .venv
+conda create -n videomae python=3.10 -y
+conda activate videomae
 
-# 2. Activate virtual environment
-# Windows:
-.venv\Scripts\activate
-# Linux/Mac:
-source .venv/bin/activate
+# 2. Install PyTorch (choose one of the presets below)
+# CUDA 12.1 build for NVIDIA GPUs
+conda install pytorch torchvision torchaudio pytorch-cuda=12.1 -c pytorch -c nvidia
 
-# 3. Install dependencies
+# CPU-only fallback (no discrete GPU required)
+conda install pytorch torchvision torchaudio cpuonly -c pytorch
+
+# 3. Install the remaining Python packages with pip
+pip install --upgrade pip
 pip install -r requirements.txt
 
-# 4. Install PyTorch separately (wheel not on PyPI)
-pip install --extra-index-url https://download.pytorch.org/whl/cu121 \
-    torch==2.5.1+cu121 torchvision==0.20.1+cu121 torchaudio==2.5.1+cu121
+# 4. (Optional) Install system libraries for video decoding on Ubuntu/Debian
+sudo apt-get update && sudo apt-get install -y ffmpeg libsm6 libxext6 libglib2.0-0
 ```
 
-> Prefer the CUDA 12.1 (`cu121`) build for GPU training. On CPU-only machines or when CUDA 12.1 is unavailable, install the corresponding CPU wheels from the same extra index or follow the [PyTorch installation matrix](https://pytorch.org/get-started/locally/).
+> Conda resolves the correct wheel variants for Linux automatically. Confirm that your NVIDIA driver supports CUDA 12.1 if you select the GPU preset.
 
-```bash
-# Conda users (CUDA 12.1 build)
-conda install pytorch torchvision torchaudio pytorch-cuda=12.1 -c pytorch -c nvidia
-```
+### Alternative runtimes
 
-> Conda defaults to matching builds automatically; ensure your NVIDIA driver supports CUDA 12.1. For CPU-only machines, omit `pytorch-cuda` or replace it with `cpuonly`.
+-   **Mamba**: Replace every `conda` command with `mamba` for faster solves.
+-   **Existing base env**: Skip environment creation if your team maintains a shared conda env; install PyTorch and the requirements into that environment instead.
+-   **Windows**: The same environment commands work in `Anaconda Prompt (PowerShell)`; skip the Linux-specific `apt-get` line.
 
 ## Dataset Setup
 
