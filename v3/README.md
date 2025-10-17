@@ -38,7 +38,20 @@ source .venv/bin/activate
 
 # 3. Install dependencies
 pip install -r requirements.txt
+
+# 4. Install PyTorch separately (wheel not on PyPI)
+pip install --extra-index-url https://download.pytorch.org/whl/cu121 \
+    torch==2.5.1+cu121 torchvision==0.20.1+cu121 torchaudio==2.5.1+cu121
 ```
+
+> Prefer the CUDA 12.1 (`cu121`) build for GPU training. On CPU-only machines or when CUDA 12.1 is unavailable, install the corresponding CPU wheels from the same extra index or follow the [PyTorch installation matrix](https://pytorch.org/get-started/locally/).
+
+```bash
+# Conda users (CUDA 12.1 build)
+conda install pytorch torchvision torchaudio pytorch-cuda=12.1 -c pytorch -c nvidia
+```
+
+> Conda defaults to matching builds automatically; ensure your NVIDIA driver supports CUDA 12.1. For CPU-only machines, omit `pytorch-cuda` or replace it with `cpuonly`.
 
 ## Dataset Setup
 
