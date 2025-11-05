@@ -2,7 +2,7 @@ tensorboard_dir: ${output.tensorboard_dir}
 log_interval: 1
 wandb:
     enable: true
-    mode: ${oc.env:WANDB_MODE,offline}
+    mode: ${oc.env:WANDB_MODE,online}
     project: null
     entity: null
     run_name: ${hydra:job.name}

@@ -3,7 +3,7 @@ log_interval: 10
 wandb:
     enable: true
     mode: ${oc.env:WANDB_MODE,online}
-    project: null
+    project: "videomae-smb-baseline"  # Default project name, can be overridden
     entity: null
     run_name: ${hydra:job.name}
     group: ${hydra:job.override_dirname}
@@ -17,6 +17,18 @@ wandb:
     log_visualizations: true
     visualization_interval: 1
     max_visualizations: 4
+
+    # Advanced metrics logging
+    log_gradient_norm: true  # Log gradient norm for training stability monitoring
+    gradient_norm_interval: 10  # Log every N batches (same as log_interval by default)
+    log_weight_norm: true  # Log weight norm per layer
+    weight_norm_interval: 100  # Log every N batches
+    log_data_loading_time: true  # Track data loading vs compute time
+
+    # Evaluation settings
+    log_episode_metrics: true  # Track per-episode performance in evaluation
+    log_video: true  # Log video/GIF of reconstructions
+    video_fps: 10  # FPS for video logging
 
 # Reconstruction visualization settings
 reconstruction_vis:
@@ -32,3 +44,7 @@ reconstruction_vis:
         - comparison_grid # Original/Masked/Recon/Diff
         - temporal_sequence # Full temporal sequence
         - error_heatmap # Error heatmap
+
+    # Masked vs unmasked region comparison
+    compare_masked_regions: true  # Compare reconstruction quality of masked vs unmasked regions
+    log_mask_patterns: false  # Visualize mask patterns (can be verbose)

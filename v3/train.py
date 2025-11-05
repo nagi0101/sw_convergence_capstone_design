@@ -4,6 +4,7 @@ Uses Hugging Face Transformers implementation
 """
 
 import os
+import time
 from typing import Optional
 
 import numpy as np
@@ -322,11 +323,22 @@ class VideoMAETrainer:
         self.model.train()
         losses = AverageMeter()
 
+        # Track data loading time if enabled
+        data_time = AverageMeter()
+        compute_time = AverageMeter()
+        batch_end_time = time.time()
+
         pbar = tqdm(self.train_loader, desc=f"Epoch {epoch}/{self.config.training.num_epochs}")
 
         for batch_idx, batch in enumerate(pbar):
+            # Measure data loading time
+            data_time.update(time.time() - batch_end_time)
+
             # Move to device with non_blocking for better performance
             pixel_values = batch['pixel_values'].to(self.device, non_blocking=True)
+
+            # Start compute timer
+            compute_start = time.time()
 
             # Generate random mask for tube masking
             batch_size = pixel_values.shape[0]
@@ -360,26 +372,31 @@ class VideoMAETrainer:
                 loss.backward()
 
             # Optimizer step with gradient accumulation
+            grad_norm = None
             if (batch_idx + 1) % self.accumulation_steps == 0:
-                # Gradient clipping
-                if self.config.training.gradient_clip > 0:
-                    if self.use_amp:
-                        self.scaler.unscale_(self.optimizer)
-                    torch.nn.utils.clip_grad_norm_(
-                        self.model.parameters(),
-                        self.config.training.gradient_clip
-                    )
+                # Gradient clipping and logging
+                if self.use_amp:
+                    self.scaler.unscale_(self.optimizer)
+
+                # Calculate gradient norm (even if not clipping)
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(),
+                    self.config.training.gradient_clip if self.config.training.gradient_clip > 0 else float('inf')
+                )
 
                 if self.use_amp:
                     self.scaler.step(self.optimizer)
                     self.scaler.update()
                 else:
                     self.optimizer.step()
-                
+
                 self.optimizer.zero_grad()
 
             # Update metrics (use original loss for logging)
             losses.update(loss.item() * self.accumulation_steps, pixel_values.size(0))
+
+            # Update compute time
+            compute_time.update(time.time() - compute_start)
 
             # Update progress bar
             pbar.set_postfix({
@@ -406,6 +423,32 @@ class VideoMAETrainer:
                     }
                     if self.device.type == 'cuda':
                         log_dict['train/gpu_mem_mb'] = gpu_mem_mb
+
+                    # Log gradient norm if enabled and available
+                    if (grad_norm is not None and
+                        hasattr(self.config.logging.wandb, 'log_gradient_norm') and
+                        self.config.logging.wandb.log_gradient_norm):
+                        log_dict['train/grad_norm'] = grad_norm.item()
+
+                    # Log data loading time if enabled
+                    if (hasattr(self.config.logging.wandb, 'log_data_loading_time') and
+                        self.config.logging.wandb.log_data_loading_time):
+                        log_dict['train/data_time'] = data_time.avg
+                        log_dict['train/compute_time'] = compute_time.avg
+
+                    # Log weight norms if enabled
+                    if (hasattr(self.config.logging.wandb, 'log_weight_norm') and
+                        self.config.logging.wandb.log_weight_norm and
+                        hasattr(self.config.logging.wandb, 'weight_norm_interval') and
+                        batch_idx % self.config.logging.wandb.weight_norm_interval == 0):
+                        weight_norms = {}
+                        for name, param in self.model.named_parameters():
+                            if param.requires_grad and 'weight' in name:
+                                # Use a simplified name for cleaner wandb UI
+                                clean_name = name.replace('module.', '').replace('.weight', '')
+                                weight_norms[f'weight_norm/{clean_name}'] = param.data.norm(2).item()
+                        log_dict.update(weight_norms)
+
                     self._wandb.log(log_dict, step=global_step)
 
             if (
@@ -415,6 +458,9 @@ class VideoMAETrainer:
                 and batch_idx == 0
             ):
                 self._log_wandb_training_visual(pixel_values.detach(), epoch, global_step)
+
+            # Update timer for next iteration
+            batch_end_time = time.time()
 
         # Log epoch metrics using the last global_step
         final_step = epoch * len(self.train_loader) + len(self.train_loader) - 1
@@ -565,7 +611,7 @@ class VideoMAETrainer:
                 fixed_pixel_values.cpu(),
                 reconstructed.cpu()
             )
-            
+
             # Log metrics
             current_step = epoch * len(self.train_loader) + len(self.train_loader) - 1
             metric_log = {
@@ -579,6 +625,24 @@ class VideoMAETrainer:
                 'val/median_psnr': metrics['median_psnr'],
                 'epoch': epoch
             }
+
+            # Compute and log masked vs unmasked metrics if enabled
+            if (hasattr(self.config.logging.reconstruction_vis, 'compare_masked_regions') and
+                self.config.logging.reconstruction_vis.compare_masked_regions):
+                masked_metrics = self.visualizer.compute_masked_unmasked_metrics(
+                    fixed_pixel_values.cpu(),
+                    reconstructed.cpu(),
+                    fixed_masks.cpu()
+                )
+                metric_log.update({
+                    'val/masked_psnr': masked_metrics['masked_psnr'],
+                    'val/masked_mse': masked_metrics['masked_mse'],
+                    'val/masked_mae': masked_metrics['masked_mae'],
+                    'val/unmasked_psnr': masked_metrics['unmasked_psnr'],
+                    'val/unmasked_mse': masked_metrics['unmasked_mse'],
+                    'val/unmasked_mae': masked_metrics['unmasked_mae'],
+                })
+
             self._wandb.log(metric_log, step=current_step)
             
             # Create and log visualizations

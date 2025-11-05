@@ -1,4 +1,4 @@
-data_root: ${oc.env:SMB_DATA_ROOT,../smbdataset/data-smb}
+data_root: ${oc.env:SMB_DATA_ROOT,/local_datasets/data-smb}
 image_size: 224
 num_frames: 16
 num_workers: 4

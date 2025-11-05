@@ -215,6 +215,52 @@ class VideoMAEEvaluator:
         wandb_module.log({'eval/visualizations': images}, step=global_step)
         self._wandb_visualizations += 1
 
+    def _log_wandb_videos(
+        self,
+        video_samples: list,
+        fps: int,
+        step: int
+    ) -> None:
+        """Log video samples to wandb"""
+        if not self.use_wandb or self._wandb is None:
+            return
+
+        wandb_module = self._wandb
+        if wandb_module is None:
+            return
+
+        # Denormalization parameters
+        mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 1, 3, 1, 1)
+        std = torch.tensor([0.229, 0.224, 0.225]).view(1, 1, 3, 1, 1)
+
+        videos = []
+        for sample in video_samples:
+            original = sample['original']
+            reconstruction = sample['reconstruction']
+            idx = sample['idx']
+
+            # Denormalize [T, C, H, W] -> [T, C, H, W]
+            original_denorm = (original * std.squeeze(0) + mean.squeeze(0)).clamp(0, 1)
+            recon_denorm = (reconstruction * std.squeeze(0) + mean.squeeze(0)).clamp(0, 1)
+
+            # Convert to [T, H, W, C] for wandb.Video
+            original_np = original_denorm.permute(0, 2, 3, 1).numpy()
+            recon_np = recon_denorm.permute(0, 2, 3, 1).numpy()
+
+            # Convert to uint8 [T, H, W, C]
+            original_uint8 = (original_np * 255).astype(np.uint8)
+            recon_uint8 = (recon_np * 255).astype(np.uint8)
+
+            # Stack original and reconstruction side by side [T, H, W*2, C]
+            combined = np.concatenate([original_uint8, recon_uint8], axis=2)
+
+            # Create wandb.Video
+            video = wandb_module.Video(combined, fps=fps, format="mp4", caption=f"Sample {idx}: Original (left) vs Reconstruction (right)")
+            videos.append(video)
+
+        # Log all videos
+        wandb_module.log({'eval/reconstruction_videos': videos}, step=step)
+
     def _log_wandb_final_metrics(self, metrics: Dict[str, float], step: int) -> None:
         if not self.use_wandb or self._wandb is None:
             return
@@ -364,11 +410,31 @@ class VideoMAEEvaluator:
             'inference_time': AverageMeter()
         }
 
+        # Episode-level metrics tracking
+        episode_metrics = {}
+        log_episode_metrics = (
+            hasattr(self.config.logging.wandb, 'log_episode_metrics') and
+            self.config.logging.wandb.log_episode_metrics and
+            self.use_wandb
+        )
+
+        # Video logging
+        log_videos = (
+            hasattr(self.config.logging.wandb, 'log_video') and
+            self.config.logging.wandb.log_video and
+            self.use_wandb
+        )
+        video_fps = self.config.logging.wandb.get('video_fps', 10) if log_videos else 10
+        video_samples = []
+
         pbar = tqdm(self.test_loader, desc="Evaluating")
 
         for batch_idx, batch in enumerate(pbar):
             # Move to device
             pixel_values = batch['pixel_values'].to(self.device)
+
+            # Get episode IDs if available
+            episode_ids = batch.get('episode_id', None)
 
             # Measure inference time
             start_time = time.time()
@@ -384,6 +450,20 @@ class VideoMAEEvaluator:
             all_metrics['ssim'].update(metrics['ssim'], batch_size)
             all_metrics['mse'].update(metrics['mse'], batch_size)
             all_metrics['inference_time'].update(inference_time / batch_size, batch_size)
+
+            # Track episode-level metrics if enabled
+            if log_episode_metrics and episode_ids is not None:
+                for i, episode_id in enumerate(episode_ids):
+                    if episode_id not in episode_metrics:
+                        episode_metrics[episode_id] = {
+                            'psnr': [],
+                            'ssim': [],
+                            'mse': []
+                        }
+                    # Note: metrics are averaged over batch, so we use the same value for all samples
+                    episode_metrics[episode_id]['psnr'].append(metrics['psnr'])
+                    episode_metrics[episode_id]['ssim'].append(metrics['ssim'])
+                    episode_metrics[episode_id]['mse'].append(metrics['mse'])
 
             self._log_wandb_batch_metrics(metrics, inference_time, batch_idx)
 
@@ -402,6 +482,38 @@ class VideoMAEEvaluator:
                     batch_idx,
                     batch_idx
                 )
+
+                # Collect video samples for wandb logging
+                if log_videos and len(video_samples) < self._wandb_max_visualizations:
+                    # Store original and reconstruction for video creation
+                    video_samples.append({
+                        'original': pixel_values[0].cpu(),
+                        'reconstruction': reconstruction[0].cpu(),
+                        'idx': batch_idx
+                    })
+
+        # Log episode-level metrics if enabled
+        if log_episode_metrics and episode_metrics:
+            print("\n" + "="*50)
+            print("EPISODE-LEVEL METRICS")
+            print("="*50)
+            for episode_id, metrics_list in sorted(episode_metrics.items()):
+                avg_psnr = np.mean(metrics_list['psnr'])
+                avg_ssim = np.mean(metrics_list['ssim'])
+                avg_mse = np.mean(metrics_list['mse'])
+
+                print(f"Episode {episode_id}:")
+                print(f"  PSNR: {avg_psnr:.2f} dB")
+                print(f"  SSIM: {avg_ssim:.4f}")
+                print(f"  MSE: {avg_mse:.6f}")
+
+                # Log to wandb if available
+                if self.use_wandb and self._wandb is not None:
+                    self._wandb.log({
+                        f'eval/episode_{episode_id}/psnr': avg_psnr,
+                        f'eval/episode_{episode_id}/ssim': avg_ssim,
+                        f'eval/episode_{episode_id}/mse': avg_mse,
+                    })
 
         # Compute FPS
         fps = 1.0 / all_metrics['inference_time'].avg
@@ -431,6 +543,12 @@ class VideoMAEEvaluator:
         }
 
         final_step = len(self.test_loader) if self.test_loader is not None else 0
+
+        # Log video samples to wandb if enabled
+        if log_videos and video_samples and self.use_wandb and self._wandb is not None:
+            print(f"\nLogging {len(video_samples)} video samples to wandb...")
+            self._log_wandb_videos(video_samples, video_fps, final_step)
+
         self._log_wandb_final_metrics(results, final_step)
 
         return results

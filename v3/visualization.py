@@ -111,9 +111,133 @@ class ReconstructionVisualizer:
         metrics['best_psnr'] = float(np.max(psnr_values))
         metrics['worst_psnr'] = float(np.min(psnr_values))
         metrics['median_psnr'] = float(np.median(psnr_values))
-        
+
         return metrics
-    
+
+    def compute_masked_unmasked_metrics(self,
+                                       original: torch.Tensor,
+                                       reconstructed: torch.Tensor,
+                                       bool_masked_pos: torch.Tensor,
+                                       patch_size: int = 16,
+                                       tubelet_size: int = 2) -> Dict[str, float]:
+        """
+        Compute reconstruction quality metrics separately for masked and unmasked regions
+
+        Args:
+            original: Original frames [B, T, C, H, W]
+            reconstructed: Reconstructed frames [B, T, C, H, W]
+            bool_masked_pos: Boolean mask [B, num_patches] indicating masked patches
+            patch_size: Size of each spatial patch
+            tubelet_size: Number of frames per tubelet
+
+        Returns:
+            Dictionary of metrics for masked and unmasked regions
+        """
+        batch_size, num_frames, channels, height, width = original.shape
+
+        # Convert patch-level mask to pixel-level mask
+        num_patches_per_frame = (height // patch_size) * (width // patch_size)
+        num_temporal_patches = num_frames // tubelet_size
+
+        # Create pixel-level mask [B, T, H, W]
+        pixel_mask = torch.zeros(batch_size, num_frames, height, width, dtype=torch.bool)
+
+        for b in range(batch_size):
+            patch_idx = 0
+            for t_patch in range(num_temporal_patches):
+                for h_patch in range(height // patch_size):
+                    for w_patch in range(width // patch_size):
+                        if bool_masked_pos[b, patch_idx]:
+                            # Mark all frames in this tubelet and spatial patch
+                            t_start = t_patch * tubelet_size
+                            t_end = min(t_start + tubelet_size, num_frames)
+                            h_start = h_patch * patch_size
+                            h_end = h_start + patch_size
+                            w_start = w_patch * patch_size
+                            w_end = w_start + patch_size
+
+                            pixel_mask[b, t_start:t_end, h_start:h_end, w_start:w_end] = True
+                        patch_idx += 1
+
+        # Denormalize frames
+        original_np = []
+        reconstructed_np = []
+        mask_np = []
+
+        for b in range(batch_size):
+            for t in range(num_frames):
+                orig_frame = self.denormalize_frame(original[b, t])
+                recon_frame = self.denormalize_frame(reconstructed[b, t])
+                original_np.append(orig_frame)
+                reconstructed_np.append(recon_frame)
+                mask_np.append(pixel_mask[b, t].cpu().numpy())
+
+        # Calculate metrics separately for masked and unmasked regions
+        masked_psnr_values = []
+        masked_ssim_values = []
+        masked_mse_values = []
+        masked_mae_values = []
+
+        unmasked_psnr_values = []
+        unmasked_ssim_values = []
+        unmasked_mse_values = []
+        unmasked_mae_values = []
+
+        for orig, recon, mask in zip(original_np, reconstructed_np, mask_np):
+            # Masked regions
+            if mask.sum() > 0:
+                masked_orig = orig[mask]
+                masked_recon = recon[mask]
+
+                mse_masked = np.mean((masked_orig - masked_recon) ** 2)
+                mae_masked = np.mean(np.abs(masked_orig - masked_recon))
+                masked_mse_values.append(mse_masked)
+                masked_mae_values.append(mae_masked)
+
+                # PSNR for masked regions
+                if mse_masked > 0:
+                    psnr_masked = 10 * np.log10(1.0 / mse_masked)
+                    masked_psnr_values.append(psnr_masked)
+
+            # Unmasked regions
+            if (~mask).sum() > 0:
+                unmasked_orig = orig[~mask]
+                unmasked_recon = recon[~mask]
+
+                mse_unmasked = np.mean((unmasked_orig - unmasked_recon) ** 2)
+                mae_unmasked = np.mean(np.abs(unmasked_orig - unmasked_recon))
+                unmasked_mse_values.append(mse_unmasked)
+                unmasked_mae_values.append(mae_unmasked)
+
+                # PSNR for unmasked regions
+                if mse_unmasked > 0:
+                    psnr_unmasked = 10 * np.log10(1.0 / mse_unmasked)
+                    unmasked_psnr_values.append(psnr_unmasked)
+
+        metrics = {}
+
+        # Masked region metrics
+        if len(masked_psnr_values) > 0:
+            metrics['masked_psnr'] = float(np.mean(masked_psnr_values))
+            metrics['masked_mse'] = float(np.mean(masked_mse_values))
+            metrics['masked_mae'] = float(np.mean(masked_mae_values))
+        else:
+            metrics['masked_psnr'] = 0.0
+            metrics['masked_mse'] = 0.0
+            metrics['masked_mae'] = 0.0
+
+        # Unmasked region metrics
+        if len(unmasked_psnr_values) > 0:
+            metrics['unmasked_psnr'] = float(np.mean(unmasked_psnr_values))
+            metrics['unmasked_mse'] = float(np.mean(unmasked_mse_values))
+            metrics['unmasked_mae'] = float(np.mean(unmasked_mae_values))
+        else:
+            metrics['unmasked_psnr'] = 0.0
+            metrics['unmasked_mse'] = 0.0
+            metrics['unmasked_mae'] = 0.0
+
+        return metrics
+
     def create_comparison_grid(self, 
                               original: torch.Tensor,
                               reconstructed: torch.Tensor,
