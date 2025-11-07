@@ -11,8 +11,6 @@ from typing import Dict, Optional
 import torch
 import numpy as np
 from tqdm import tqdm
-from skimage.metrics import peak_signal_noise_ratio as psnr
-from skimage.metrics import structural_similarity as ssim
 import matplotlib.pyplot as plt
 
 import hydra
@@ -49,36 +47,82 @@ class VideoMAEEvaluator:
 
     def _load_model(self, checkpoint_path: str) -> None:
         """Load trained model from checkpoint"""
-        model_config = VideoMAEConfig(
-            image_size=self.config.data.image_size,
-            patch_size=16,
-            num_channels=3,
-            num_frames=self.config.data.num_frames,
-            tubelet_size=2,
-            hidden_size=768,
-            num_hidden_layers=12,
-            num_attention_heads=12,
-            intermediate_size=3072,
-            decoder_num_hidden_layers=4,
-            decoder_hidden_size=384,
-            decoder_num_attention_heads=6,
-            decoder_intermediate_size=1536,
-            mask_ratio=self.config.model.mask_ratio,
-            norm_pix_loss=self.config.model.norm_pix_loss
-        )
 
-        self.model = VideoMAEForPreTraining(model_config)
+        # Create model using same logic as train.py
+        # Load pretrained model or create new
+        if self.config.model.pretrained:
+            print(f"Loading pretrained model: {self.config.model.pretrained}")
+            # Load the pretrained model with its original config
+            self.model = VideoMAEForPreTraining.from_pretrained(
+                self.config.model.pretrained,
+                ignore_mismatched_sizes=True
+            )
+            # Update mask ratio if needed
+            self.model.config.mask_ratio = self.config.model.mask_ratio
+            self.model.config.norm_pix_loss = self.config.model.norm_pix_loss
+        else:
+            print("Creating new model from scratch")
+            model_config = VideoMAEConfig(
+                image_size=self.config.data.image_size,
+                patch_size=16,
+                num_channels=3,
+                num_frames=self.config.data.num_frames,
+                tubelet_size=2,
+                hidden_size=768,
+                num_hidden_layers=12,
+                num_attention_heads=12,
+                intermediate_size=3072,
+                decoder_num_hidden_layers=4,
+                decoder_hidden_size=384,
+                decoder_num_attention_heads=6,
+                decoder_intermediate_size=1536,
+                mask_ratio=self.config.model.mask_ratio,
+                norm_pix_loss=self.config.model.norm_pix_loss
+            )
+            self.model = VideoMAEForPreTraining(model_config)
 
+        # Load checkpoint weights
         if checkpoint_path:
             checkpoint = torch.load(checkpoint_path, map_location=self.device)
             if 'model_state_dict' in checkpoint:
-                self.model.load_state_dict(checkpoint['model_state_dict'])
+                state_dict = checkpoint['model_state_dict']
+
+                # Handle torch.compile() wrapped models
+                # Check if keys have _orig_mod. prefix
+                if state_dict and '_orig_mod.' in list(state_dict.keys())[0]:
+                    print("Detected torch.compile() checkpoint, removing _orig_mod. prefix...")
+                    new_state_dict = {}
+                    for k, v in state_dict.items():
+                        new_key = k.replace('_orig_mod.', '')
+                        new_state_dict[new_key] = v
+                    state_dict = new_state_dict
+
+                self.model.load_state_dict(state_dict)
             else:
                 self.model.load_state_dict(checkpoint)
             print(f"Loaded checkpoint from {checkpoint_path}")
 
         self.model = self.model.to(self.device)
         self.model.eval()
+
+        # Ensure position embeddings are on the correct device (fixes CUDA graphs warning)
+        for name, module in self.model.named_modules():
+            if hasattr(module, 'position_embeddings'):
+                if hasattr(module.position_embeddings, 'data'):
+                    module.position_embeddings.data = module.position_embeddings.data.to(self.device)
+                elif isinstance(module.position_embeddings, torch.nn.Parameter):
+                    module.position_embeddings.data = module.position_embeddings.data.to(self.device)
+
+        # Also check for position_ids which might be registered as buffers
+        for name, buffer in self.model.named_buffers():
+            if 'position' in name.lower():
+                buffer.data = buffer.data.to(self.device)
+
+        # Optional: Compile model for faster inference
+        if hasattr(self.config.evaluation, 'use_compile') and self.config.evaluation.use_compile:
+            print("Compiling model with torch.compile()...")
+            self.model = torch.compile(self.model, mode='reduce-overhead')
+            print("Model compiled successfully")
 
         # Image processor
         self.processor = VideoMAEImageProcessor(
@@ -229,19 +273,20 @@ class VideoMAEEvaluator:
         if wandb_module is None:
             return
 
-        # Denormalization parameters
-        mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 1, 3, 1, 1)
-        std = torch.tensor([0.229, 0.224, 0.225]).view(1, 1, 3, 1, 1)
-
         videos = []
         for sample in video_samples:
             original = sample['original']
             reconstruction = sample['reconstruction']
             idx = sample['idx']
 
+            # Denormalization parameters (shape for [T, C, H, W] tensors)
+            mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+            std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+
             # Denormalize [T, C, H, W] -> [T, C, H, W]
-            original_denorm = (original * std.squeeze(0) + mean.squeeze(0)).clamp(0, 1)
-            recon_denorm = (reconstruction * std.squeeze(0) + mean.squeeze(0)).clamp(0, 1)
+            # Use detach().cpu() to ensure gradient-free CPU tensors
+            original_denorm = (original.detach().cpu() * std + mean).clamp(0, 1)
+            recon_denorm = (reconstruction.detach().cpu() * std + mean).clamp(0, 1)
 
             # Convert to [T, H, W, C] for wandb.Video
             original_np = original_denorm.permute(0, 2, 3, 1).numpy()
@@ -306,102 +351,222 @@ class VideoMAEEvaluator:
         mask_ratio = self.config.model.mask_ratio
         num_masked = int(num_patches * mask_ratio)
 
-        # Create mask for each sample in batch
-        bool_masked_pos = torch.zeros((batch_size, num_patches), dtype=torch.bool)
+        # Create mask on target device directly (avoid CPU->GPU copy)
+        bool_masked_pos = torch.zeros((batch_size, num_patches), dtype=torch.bool, device=self.device)
 
         for i in range(batch_size):
-            # Randomly select patches to mask
-            mask_indices = torch.randperm(num_patches)[:num_masked]
+            # Randomly select patches to mask (on target device)
+            mask_indices = torch.randperm(num_patches, device=self.device)[:num_masked]
             bool_masked_pos[i, mask_indices] = True
 
         return bool_masked_pos
 
+    def patchify(self, pixel_values: torch.Tensor) -> torch.Tensor:
+        """
+        Patchify video into patches
+        Args:
+            pixel_values: [B, T, C, H, W]
+        Returns:
+            patches: [B, num_patches, patch_dim]
+        """
+        batch_size, num_frames, channels, height, width = pixel_values.shape
+        patch_size = 16
+        tubelet_size = 2
+
+        # Number of patches in each dimension
+        num_patches_h = height // patch_size
+        num_patches_w = width // patch_size
+        num_patches_t = num_frames // tubelet_size
+
+        # Reshape to patches
+        # [B, T, C, H, W] -> [B, T//tubelet_size, tubelet_size, C, H//patch_size, patch_size, W//patch_size, patch_size]
+        patches = pixel_values.reshape(
+            batch_size,
+            num_patches_t, tubelet_size,
+            channels,
+            num_patches_h, patch_size,
+            num_patches_w, patch_size
+        )
+
+        # Permute to group patches
+        # -> [B, num_patches_t, num_patches_h, num_patches_w, tubelet_size, patch_size, patch_size, C]
+        patches = patches.permute(0, 1, 4, 6, 2, 5, 7, 3)
+
+        # Flatten patches
+        # -> [B, num_patches_t * num_patches_h * num_patches_w, tubelet_size * patch_size * patch_size * C]
+        num_patches = num_patches_t * num_patches_h * num_patches_w
+        patch_dim = tubelet_size * patch_size * patch_size * channels
+        patches = patches.reshape(batch_size, num_patches, patch_dim)
+
+        return patches
+
+    def unpatchify(self, patches: torch.Tensor, original_shape: tuple) -> torch.Tensor:
+        """
+        Unpatchify patches back to video
+        Args:
+            patches: [B, num_patches, patch_dim]
+            original_shape: (B, T, C, H, W)
+        Returns:
+            video: [B, T, C, H, W]
+        """
+        batch_size, num_frames, channels, height, width = original_shape
+        patch_size = 16
+        tubelet_size = 2
+
+        num_patches_h = height // patch_size
+        num_patches_w = width // patch_size
+        num_patches_t = num_frames // tubelet_size
+
+        # Reshape patches
+        # [B, num_patches, patch_dim] -> [B, num_patches_t, num_patches_h, num_patches_w, tubelet_size, patch_size, patch_size, C]
+        patches = patches.reshape(
+            batch_size,
+            num_patches_t, num_patches_h, num_patches_w,
+            tubelet_size, patch_size, patch_size, channels
+        )
+
+        # Permute back
+        # -> [B, num_patches_t, tubelet_size, C, num_patches_h, patch_size, num_patches_w, patch_size]
+        patches = patches.permute(0, 1, 4, 7, 2, 5, 3, 6)
+
+        # Reshape to original video shape
+        video = patches.reshape(batch_size, num_frames, channels, height, width)
+
+        return video
+
     def reconstruct_video(self, pixel_values: torch.Tensor) -> torch.Tensor:
-        """Reconstruct video from masked inputs"""
-        with torch.no_grad():
-            # Generate mask
-            batch_size = pixel_values.shape[0]
-            # Calculate number of patches dynamically
-            # VideoMAE expects input shape: (batch, num_frames, channels, height, width)
-            num_frames = pixel_values.shape[1]
-            height = pixel_values.shape[3]
-            width = pixel_values.shape[4]
+        """Reconstruct video from masked inputs
 
-            # Number of patches = (num_frames // tubelet_size) * (image_size // patch_size)^2
-            tubelet_size = 2
-            patch_size = 16
-            seq_length = (num_frames // tubelet_size) * ((height // patch_size) * (width // patch_size))
-            num_patches = seq_length
-            bool_masked_pos = self._generate_mask(batch_size, num_patches)
-            bool_masked_pos = bool_masked_pos.to(self.device)
+        VideoMAE reconstruction process:
+        1. Patchify original video
+        2. Mask some patches
+        3. Model reconstructs masked patches
+        4. Combine unmasked (original) + masked (reconstructed)
+        5. Unpatchify to full video
+        """
+        batch_size = pixel_values.shape[0]
+        num_frames = pixel_values.shape[1]
+        height = pixel_values.shape[3]
+        width = pixel_values.shape[4]
 
-            # Forward pass with mask
-            outputs = self.model(pixel_values=pixel_values, bool_masked_pos=bool_masked_pos)
+        # Calculate number of patches
+        tubelet_size = 2
+        patch_size = 16
+        seq_length = (num_frames // tubelet_size) * ((height // patch_size) * (width // patch_size))
+        num_patches = seq_length
 
-            # Get reconstruction
-            reconstruction = outputs.reconstruction
-            if reconstruction is None:
-                # If model doesn't provide reconstruction, compute it manually
-                logits = outputs.logits
-                reconstruction = self.model.unpatchify(logits)
+        # Generate mask (already on self.device)
+        bool_masked_pos = self._generate_mask(batch_size, num_patches)
+
+        # Patchify original video
+        original_patches = self.patchify(pixel_values)
+
+        # Forward pass with mask
+        outputs = self.model(pixel_values=pixel_values, bool_masked_pos=bool_masked_pos)
+
+        # Get logits (reconstruction of masked patches)
+        logits = outputs.logits  # [B, num_masked, patch_dim]
+
+        # Denormalize logits if model uses norm_pix_loss
+        if self.config.model.norm_pix_loss:
+            # Denormalize: logits are normalized per patch
+            # Calculate mean and std from original patches
+            mean = original_patches.mean(dim=-1, keepdim=True)  # [B, num_patches, 1]
+            var = original_patches.var(dim=-1, keepdim=True)    # [B, num_patches, 1]
+
+            # Select mean and var for masked positions only
+            # logits is [B, num_masked, patch_dim]
+            # We need mean/var for masked positions only
+            mean_masked_list = []
+            var_masked_list = []
+            for i in range(batch_size):
+                mask = bool_masked_pos[i]
+                mean_masked_list.append(mean[i, mask, :])
+                var_masked_list.append(var[i, mask, :])
+
+            mean_masked = torch.stack(mean_masked_list)  # [B, num_masked, 1]
+            var_masked = torch.stack(var_masked_list)    # [B, num_masked, 1]
+
+            # Denormalize
+            logits = logits * (var_masked + 1.e-6)**.5 + mean_masked
+
+        # Create full reconstruction by combining original and reconstructed patches
+        reconstructed_patches = original_patches.clone()
+
+        # Replace masked positions with reconstructed patches
+        for i in range(batch_size):
+            mask = bool_masked_pos[i]
+            reconstructed_patches[i, mask] = logits[i]
+
+        # Unpatchify to get full video
+        original_shape = pixel_values.shape
+        reconstruction = self.unpatchify(reconstructed_patches, original_shape)
 
         return reconstruction
 
     def compute_metrics(self, original: torch.Tensor, reconstructed: torch.Tensor) -> Dict[str, float]:
-        """Compute evaluation metrics"""
+        """Compute evaluation metrics using GPU-based operations"""
         metrics: Dict[str, float] = {}
 
-        # Convert to numpy arrays
-        orig_np = original.cpu().numpy()
-        recon_np = reconstructed.cpu().numpy()
+        # Denormalize on GPU (assuming standard ImageNet normalization)
+        mean = torch.tensor([0.485, 0.456, 0.406], device=original.device).view(1, 1, 3, 1, 1)
+        std = torch.tensor([0.229, 0.224, 0.225], device=original.device).view(1, 1, 3, 1, 1)
 
-        # Denormalize if needed (assuming standard ImageNet normalization)
-        mean = np.array([0.485, 0.456, 0.406]).reshape(1, 1, 3, 1, 1)
-        std = np.array([0.229, 0.224, 0.225]).reshape(1, 1, 3, 1, 1)
-
-        orig_np = orig_np * std + mean
-        recon_np = recon_np * std + mean
+        orig_normalized = original * std + mean
+        recon_normalized = reconstructed * std + mean
 
         # Clip to [0, 1]
-        orig_np = np.clip(orig_np, 0, 1)
-        recon_np = np.clip(recon_np, 0, 1)
+        orig_normalized = torch.clamp(orig_normalized, 0, 1)
+        recon_normalized = torch.clamp(recon_normalized, 0, 1)
 
-        # Compute metrics for each sample in batch
-        batch_size = orig_np.shape[0]
-        psnr_scores = []
-        ssim_scores = []
-        mse_scores = []
+        # Compute MSE (vectorized across all dimensions)
+        mse = torch.mean((orig_normalized - recon_normalized) ** 2).item()
 
-        for i in range(batch_size):
-            # Average across frames
-            for j in range(orig_np.shape[1]):  # num_frames
-                # Convert to HWC format for metrics
-                orig_frame = np.transpose(orig_np[i, j], (1, 2, 0))
-                recon_frame = np.transpose(recon_np[i, j], (1, 2, 0))
+        # Compute PSNR from MSE
+        psnr_value = 10 * torch.log10(1.0 / (torch.tensor(mse) + 1e-10)).item()
 
-                # PSNR
-                psnr_score = psnr(orig_frame, recon_frame, data_range=1.0)
-                psnr_scores.append(psnr_score)
+        # Simplified SSIM approximation on GPU (batch computation)
+        # Using structural similarity based on mean, variance, and covariance
+        # Reshape to (B*T, C, H, W) for easier computation
+        B, T, C, H, W = orig_normalized.shape
+        orig_flat = orig_normalized.reshape(B * T, C, H, W)
+        recon_flat = recon_normalized.reshape(B * T, C, H, W)
 
-                # SSIM
-                ssim_score = ssim(orig_frame, recon_frame,
-                                 data_range=1.0, channel_axis=2)
-                ssim_scores.append(ssim_score)
+        # Constants for SSIM
+        C1 = 0.01 ** 2
+        C2 = 0.03 ** 2
 
-                # MSE
-                mse_score = np.mean((orig_frame - recon_frame) ** 2)
-                mse_scores.append(mse_score)
+        # Compute means
+        mu1 = torch.mean(orig_flat, dim=[2, 3], keepdim=True)
+        mu2 = torch.mean(recon_flat, dim=[2, 3], keepdim=True)
 
-        metrics['psnr'] = float(np.mean(psnr_scores))
-        metrics['ssim'] = float(np.mean(ssim_scores))
-        metrics['mse'] = float(np.mean(mse_scores))
+        # Compute variances and covariance
+        sigma1_sq = torch.mean((orig_flat - mu1) ** 2, dim=[2, 3], keepdim=True)
+        sigma2_sq = torch.mean((recon_flat - mu2) ** 2, dim=[2, 3], keepdim=True)
+        sigma12 = torch.mean((orig_flat - mu1) * (recon_flat - mu2), dim=[2, 3], keepdim=True)
+
+        # SSIM formula
+        ssim_map = ((2 * mu1 * mu2 + C1) * (2 * sigma12 + C2)) / \
+                   ((mu1 ** 2 + mu2 ** 2 + C1) * (sigma1_sq + sigma2_sq + C2))
+
+        # Average SSIM across all frames and channels
+        ssim_value = torch.mean(ssim_map).item()
+
+        metrics['psnr'] = float(psnr_value)
+        metrics['ssim'] = float(ssim_value)
+        metrics['mse'] = float(mse)
 
         return metrics
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def evaluate(self) -> Dict[str, float]:
-        """Run full evaluation"""
+        """Run full evaluation with inference optimizations"""
         print("Starting evaluation...")
+
+        # Check if AMP should be used
+        use_amp = hasattr(self.config.evaluation, 'use_amp') and self.config.evaluation.use_amp
+        if use_amp:
+            print("Using Automatic Mixed Precision (AMP) for inference")
 
         all_metrics = {
             'psnr': AverageMeter(),
@@ -427,6 +592,9 @@ class VideoMAEEvaluator:
         video_fps = self.config.logging.wandb.get('video_fps', 10) if log_videos else 10
         video_samples = []
 
+        # Queue for async visualization (collect during loop, save after)
+        visualization_queue = []
+
         pbar = tqdm(self.test_loader, desc="Evaluating")
 
         for batch_idx, batch in enumerate(pbar):
@@ -438,7 +606,14 @@ class VideoMAEEvaluator:
 
             # Measure inference time
             start_time = time.time()
-            reconstruction = self.reconstruct_video(pixel_values)
+
+            # Use AMP if enabled
+            if use_amp and torch.cuda.is_available():
+                with torch.amp.autocast(device_type='cuda', dtype=torch.float16):
+                    reconstruction = self.reconstruct_video(pixel_values)
+            else:
+                reconstruction = self.reconstruct_video(pixel_values)
+
             inference_time = time.time() - start_time
 
             # Compute metrics
@@ -474,14 +649,13 @@ class VideoMAEEvaluator:
                 'MSE': f"{all_metrics['mse'].avg:.4f}"
             })
 
-            # Save sample visualizations
+            # Collect data for visualizations (save after loop to avoid I/O blocking)
             if batch_idx < self.config.evaluation.num_visualizations:
-                self.save_visualization(
-                    pixel_values[0],
-                    reconstruction[0],
-                    batch_idx,
-                    batch_idx
-                )
+                visualization_queue.append({
+                    'original': pixel_values[0].cpu(),
+                    'reconstruction': reconstruction[0].cpu(),
+                    'idx': batch_idx
+                })
 
                 # Collect video samples for wandb logging
                 if log_videos and len(video_samples) < self._wandb_max_visualizations:
@@ -491,6 +665,20 @@ class VideoMAEEvaluator:
                         'reconstruction': reconstruction[0].cpu(),
                         'idx': batch_idx
                     })
+
+        # Save all visualizations (async - after evaluation loop to avoid I/O blocking)
+        if visualization_queue:
+            print(f"\nSaving {len(visualization_queue)} visualizations...")
+            for viz_data in visualization_queue:
+                self.save_visualization(
+                    viz_data['original'],
+                    viz_data['reconstruction'],
+                    viz_data['idx'],
+                    viz_data['idx']
+                )
+
+        # Calculate final step for wandb logging
+        final_step = len(self.test_loader) if self.test_loader is not None else 0
 
         # Log episode-level metrics if enabled
         if log_episode_metrics and episode_metrics:
@@ -513,7 +701,7 @@ class VideoMAEEvaluator:
                         f'eval/episode_{episode_id}/psnr': avg_psnr,
                         f'eval/episode_{episode_id}/ssim': avg_ssim,
                         f'eval/episode_{episode_id}/mse': avg_mse,
-                    })
+                    }, step=final_step)
 
         # Compute FPS
         fps = 1.0 / all_metrics['inference_time'].avg
@@ -542,8 +730,6 @@ class VideoMAEEvaluator:
             'memory_mb': float(memory_mb)
         }
 
-        final_step = len(self.test_loader) if self.test_loader is not None else 0
-
         # Log video samples to wandb if enabled
         if log_videos and video_samples and self.use_wandb and self._wandb is not None:
             print(f"\nLogging {len(video_samples)} video samples to wandb...")
@@ -560,10 +746,10 @@ class VideoMAEEvaluator:
         idx: int,
         global_step: int
     ) -> None:
-        """Save visualization of original vs reconstructed frames"""
-        # Denormalize
-        mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1).to(self.device)
-        std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1).to(self.device)
+        """Save enhanced visualization with difference heatmap"""
+        # Denormalize (use input tensor's device for compatibility)
+        mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1).to(original.device)
+        std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1).to(original.device)
 
         # Select middle frame
         mid_frame = original.shape[0] // 2
@@ -579,20 +765,72 @@ class VideoMAEEvaluator:
         orig_np = orig_frame.cpu().numpy().transpose(1, 2, 0)
         recon_np = recon_frame.cpu().numpy().transpose(1, 2, 0)
 
-        # Create figure
-        fig, axes = plt.subplots(1, 2, figsize=(10, 5))
+        # Calculate absolute difference
+        diff_np = np.abs(orig_np - recon_np)
 
-        axes[0].imshow(orig_np)
-        axes[0].set_title('Original')
-        axes[0].axis('off')
+        # Calculate MSE for this frame
+        mse = np.mean((orig_np - recon_np) ** 2)
+        psnr_val = 10 * np.log10(1.0 / (mse + 1e-10))
 
-        axes[1].imshow(recon_np)
-        axes[1].set_title('Reconstructed')
-        axes[1].axis('off')
+        # Create enhanced figure with 4 panels
+        fig, axes = plt.subplots(2, 2, figsize=(12, 12))
+
+        # Original
+        axes[0, 0].imshow(orig_np)
+        axes[0, 0].set_title('Original', fontsize=14, fontweight='bold')
+        axes[0, 0].axis('off')
+
+        # Reconstructed
+        axes[0, 1].imshow(recon_np)
+        axes[0, 1].set_title('Reconstructed', fontsize=14, fontweight='bold')
+        axes[0, 1].axis('off')
+
+        # Difference heatmap (grayscale)
+        diff_gray = np.mean(diff_np, axis=2)
+        im = axes[1, 0].imshow(diff_gray, cmap='hot', vmin=0, vmax=0.5)
+        axes[1, 0].set_title('Difference Heatmap', fontsize=14, fontweight='bold')
+        axes[1, 0].axis('off')
+        plt.colorbar(im, ax=axes[1, 0], fraction=0.046, pad=0.04)
+
+        # Difference overlay (amplified for visibility)
+        diff_amplified = np.clip(diff_np * 5, 0, 1)
+        axes[1, 1].imshow(diff_amplified)
+        axes[1, 1].set_title('Difference (5x amplified)', fontsize=14, fontweight='bold')
+        axes[1, 1].axis('off')
+
+        # Add overall metrics as text
+        fig.suptitle(f'Sample {idx} - PSNR: {psnr_val:.2f} dB, MSE: {mse:.6f}',
+                     fontsize=16, fontweight='bold')
 
         # Save figure
-        save_path = os.path.join(self.visualization_dir, f'sample_{idx}.png')
-        plt.savefig(save_path, dpi=100, bbox_inches='tight')
+        save_path = os.path.join(self.visualization_dir, f'sample_{idx}_comparison.png')
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close()
+
+        # Also save individual images for easier inspection
+        plt.figure(figsize=(6, 6))
+        plt.imshow(orig_np)
+        plt.title(f'Original - Sample {idx}')
+        plt.axis('off')
+        plt.savefig(os.path.join(self.visualization_dir, f'sample_{idx}_original.png'),
+                    dpi=150, bbox_inches='tight')
+        plt.close()
+
+        plt.figure(figsize=(6, 6))
+        plt.imshow(recon_np)
+        plt.title(f'Reconstructed - Sample {idx}')
+        plt.axis('off')
+        plt.savefig(os.path.join(self.visualization_dir, f'sample_{idx}_reconstructed.png'),
+                    dpi=150, bbox_inches='tight')
+        plt.close()
+
+        plt.figure(figsize=(6, 6))
+        plt.imshow(diff_gray, cmap='hot', vmin=0, vmax=0.5)
+        plt.title(f'Difference Heatmap - Sample {idx}')
+        plt.axis('off')
+        plt.colorbar(fraction=0.046, pad=0.04)
+        plt.savefig(os.path.join(self.visualization_dir, f'sample_{idx}_difference.png'),
+                    dpi=150, bbox_inches='tight')
         plt.close()
 
         self._log_wandb_visualization(orig_np, recon_np, idx, global_step)

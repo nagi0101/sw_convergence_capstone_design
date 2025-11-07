@@ -56,6 +56,7 @@ class VideoMAETrainer:
         os.makedirs(tensorboard_dir, exist_ok=True)
         self.writer = SummaryWriter(log_dir=tensorboard_dir)
         self.best_val_loss = float('inf')
+        self.start_epoch = 1  # Will be updated if resuming from checkpoint
         self.checkpoint_dir = os.path.abspath(self.config.training.checkpoint_dir)
         os.makedirs(self.checkpoint_dir, exist_ok=True)
         self.artifacts_dir = os.path.abspath(self.config.output.artifacts_dir)
@@ -302,6 +303,16 @@ class VideoMAETrainer:
             step=global_step
         )
         self._wandb_visualizations += 1
+
+    def _get_model_for_saving(self) -> torch.nn.Module:
+        """Get the unwrapped model for checkpoint saving
+
+        Handles torch.compile() wrapped models by returning the original model
+        """
+        # Check if model was compiled with torch.compile()
+        if hasattr(self.model, '_orig_mod'):
+            return self.model._orig_mod
+        return self.model
 
     def _generate_mask(self, batch_size: int, num_patches: int) -> torch.Tensor:
         """Generate tube masking for VideoMAE"""
@@ -699,9 +710,9 @@ class VideoMAETrainer:
 
     def train(self) -> None:
         """Main training loop"""
-        print(f"Starting training for {self.config.training.num_epochs} epochs")
+        print(f"Starting training from epoch {self.start_epoch} to {self.config.training.num_epochs}")
 
-        for epoch in range(1, self.config.training.num_epochs + 1):
+        for epoch in range(self.start_epoch, self.config.training.num_epochs + 1):
             # Train
             train_loss = self.train_epoch(epoch)
             print(f"Epoch {epoch} - Train Loss: {train_loss:.4f}")
@@ -718,11 +729,14 @@ class VideoMAETrainer:
                 if val_loss < self.best_val_loss:
                     self.best_val_loss = val_loss
                     save_checkpoint(
-                        self.model,
+                        self._get_model_for_saving(),
                         self.optimizer,
                         epoch,
                         val_loss,
-                        os.path.join(self.checkpoint_dir, 'best_model.pth')
+                        os.path.join(self.checkpoint_dir, 'best_model.pth'),
+                        scheduler=self.scheduler,
+                        scaler=self.scaler,
+                        best_val_loss=self.best_val_loss
                     )
                     print(f"Saved best model with val loss: {val_loss:.4f}")
                     if self.use_wandb and self._wandb is not None:
@@ -734,11 +748,14 @@ class VideoMAETrainer:
             # Save checkpoint
             if epoch % self.config.training.save_interval == 0:
                 save_checkpoint(
-                    self.model,
+                    self._get_model_for_saving(),
                     self.optimizer,
                     epoch,
                     train_loss,
-                    os.path.join(self.checkpoint_dir, f'checkpoint_epoch_{epoch}.pth')
+                    os.path.join(self.checkpoint_dir, f'checkpoint_epoch_{epoch}.pth'),
+                    scheduler=self.scheduler,
+                    scaler=self.scaler,
+                    best_val_loss=self.best_val_loss
                 )
                 if (
                     self.use_wandb
@@ -747,6 +764,18 @@ class VideoMAETrainer:
                     and hasattr(self._wandb, 'save')
                 ):
                     self._wandb.save(os.path.join(self.checkpoint_dir, f'checkpoint_epoch_{epoch}.pth'))
+
+            # Always save latest checkpoint (overwrite each epoch)
+            save_checkpoint(
+                self._get_model_for_saving(),
+                self.optimizer,
+                epoch,
+                train_loss,
+                os.path.join(self.checkpoint_dir, 'latest.pth'),
+                scheduler=self.scheduler,
+                scaler=self.scaler,
+                best_val_loss=self.best_val_loss
+            )
 
         print("Training completed!")
         self.writer.close()
@@ -769,8 +798,23 @@ def main(cfg: DictConfig) -> None:
     # Resume if specified
     if cfg.training.resume:
         resume_path = to_absolute_path(str(cfg.training.resume))
-        checkpoint = load_checkpoint(resume_path, trainer.model, trainer.optimizer)
-        print(f"Resumed from epoch {checkpoint['epoch']}")
+        checkpoint = load_checkpoint(
+            resume_path,
+            trainer.model,
+            trainer.optimizer,
+            scheduler=trainer.scheduler,
+            scaler=trainer.scaler
+        )
+
+        # Resume from next epoch
+        trainer.start_epoch = checkpoint['epoch'] + 1
+
+        # Restore best validation loss
+        if 'best_val_loss' in checkpoint:
+            trainer.best_val_loss = checkpoint['best_val_loss']
+            print(f"Restored best validation loss: {trainer.best_val_loss:.4f}")
+
+        print(f"Resumed training from epoch {trainer.start_epoch}")
 
     # Train
     trainer.train()

@@ -46,9 +46,12 @@ def save_checkpoint(
     optimizer: torch.optim.Optimizer,
     epoch: int,
     loss: float,
-    filepath: str
+    filepath: str,
+    scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
+    scaler: Optional[torch.amp.GradScaler] = None,
+    best_val_loss: Optional[float] = None
 ) -> None:
-    """Save model checkpoint"""
+    """Save model checkpoint with full training state"""
     os.makedirs(os.path.dirname(filepath), exist_ok=True)
 
     checkpoint = {
@@ -58,6 +61,26 @@ def save_checkpoint(
         'loss': loss,
     }
 
+    # Save scheduler state
+    if scheduler is not None:
+        checkpoint['scheduler_state_dict'] = scheduler.state_dict()
+
+    # Save scaler state (for AMP)
+    if scaler is not None:
+        checkpoint['scaler_state_dict'] = scaler.state_dict()
+
+    # Save best validation loss
+    if best_val_loss is not None:
+        checkpoint['best_val_loss'] = best_val_loss
+
+    # Save random states for reproducibility
+    checkpoint['random_states'] = {
+        'torch': torch.get_rng_state(),
+        'torch_cuda': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+        'numpy': np.random.get_state(),
+        'random': random.getstate()
+    }
+
     torch.save(checkpoint, filepath)
     print(f"Checkpoint saved to {filepath}")
 
@@ -65,20 +88,45 @@ def save_checkpoint(
 def load_checkpoint(
     filepath: str,
     model: nn.Module,
-    optimizer: Optional[torch.optim.Optimizer] = None
+    optimizer: Optional[torch.optim.Optimizer] = None,
+    scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
+    scaler: Optional[torch.amp.GradScaler] = None,
+    restore_random_states: bool = True
 ) -> Dict:
-    """Load model checkpoint"""
+    """Load model checkpoint with full training state"""
     if not os.path.exists(filepath):
         raise FileNotFoundError(f"Checkpoint not found: {filepath}")
 
     checkpoint = torch.load(filepath, map_location='cpu')
 
+    # Load model state
     model.load_state_dict(checkpoint['model_state_dict'])
 
+    # Load optimizer state
     if optimizer is not None and 'optimizer_state_dict' in checkpoint:
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
 
-    print(f"Checkpoint loaded from {filepath}")
+    # Load scheduler state
+    if scheduler is not None and 'scheduler_state_dict' in checkpoint:
+        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        print(f"Scheduler state restored")
+
+    # Load scaler state (for AMP)
+    if scaler is not None and 'scaler_state_dict' in checkpoint:
+        scaler.load_state_dict(checkpoint['scaler_state_dict'])
+        print(f"GradScaler state restored")
+
+    # Restore random states for reproducibility
+    if restore_random_states and 'random_states' in checkpoint:
+        random_states = checkpoint['random_states']
+        torch.set_rng_state(random_states['torch'])
+        if random_states['torch_cuda'] is not None and torch.cuda.is_available():
+            torch.cuda.set_rng_state_all(random_states['torch_cuda'])
+        np.random.set_state(random_states['numpy'])
+        random.setstate(random_states['random'])
+        print(f"Random states restored")
+
+    print(f"Checkpoint loaded from {filepath} (epoch {checkpoint['epoch']})")
 
     return checkpoint
 

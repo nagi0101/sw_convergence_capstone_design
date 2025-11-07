@@ -1,18 +1,18 @@
 num_epochs: 100
-batch_size: 48
+batch_size: 96
 accumulation_steps: 1
-learning_rate: 0.00048
+learning_rate: 0.00096
 min_lr: 0.000006
 weight_decay: 0.05
 gradient_clip: 1.0
 seed: 42
 val_interval: 10
-save_interval: 50
+save_interval: 10
 checkpoint_dir: ${output.checkpoint_dir}
 resume: null
 
 # Optimization options
 use_amp: true
-use_compile: false
+use_compile: true
 fused_optimizer: true
-gradient_checkpointing: true
+gradient_checkpointing: false

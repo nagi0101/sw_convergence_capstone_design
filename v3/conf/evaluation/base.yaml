@@ -1,5 +1,9 @@
-batch_size: 4
-num_visualizations: 10
+batch_size: 96
+num_visualizations: 3
 visualization_dir: ${output.visualization_dir}
 results_file: ${output.results_file}
 checkpoint_path: null
+
+# Inference optimization options
+use_amp: true
+use_compile: false
