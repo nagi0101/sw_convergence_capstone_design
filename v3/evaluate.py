@@ -279,28 +279,116 @@ class VideoMAEEvaluator:
             reconstruction = sample['reconstruction']
             idx = sample['idx']
 
+            # Debug: Check input shapes
+            print(f"\n=== Video Sample {idx} Debug ===")
+            print(f"Input original shape: {original.shape}")
+            print(f"Input reconstruction shape: {reconstruction.shape}")
+
             # Denormalization parameters (shape for [T, C, H, W] tensors)
-            mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
-            std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+            # Shape [1, C, 1, 1] to broadcast correctly with [T, C, H, W]
+            mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
+            std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
+            print(f"Mean shape: {mean.shape}, Std shape: {std.shape}")
 
             # Denormalize [T, C, H, W] -> [T, C, H, W]
             # Use detach().cpu() to ensure gradient-free CPU tensors
             original_denorm = (original.detach().cpu() * std + mean).clamp(0, 1)
             recon_denorm = (reconstruction.detach().cpu() * std + mean).clamp(0, 1)
+            print(f"After denorm - original shape: {original_denorm.shape}")
+            print(f"After denorm - recon shape: {recon_denorm.shape}")
+            print(f"After denorm - original min/max: {original_denorm.min():.3f}/{original_denorm.max():.3f}")
+            print(f"After denorm - recon min/max: {recon_denorm.min():.3f}/{recon_denorm.max():.3f}")
 
             # Convert to [T, H, W, C] for wandb.Video
+            # Note: We need to ensure correct dimension ordering for wandb.Video
+            # From [T, C, H, W] we permute to [T, H, W, C]
             original_np = original_denorm.permute(0, 2, 3, 1).numpy()
             recon_np = recon_denorm.permute(0, 2, 3, 1).numpy()
+            print(f"After permute - original_np shape: {original_np.shape}")
+            print(f"After permute - recon_np shape: {recon_np.shape}")
+            print(f"Dimension interpretation: [frames={original_np.shape[0]}, height={original_np.shape[1]}, width={original_np.shape[2]}, channels={original_np.shape[3]}]")
 
             # Convert to uint8 [T, H, W, C]
             original_uint8 = (original_np * 255).astype(np.uint8)
             recon_uint8 = (recon_np * 255).astype(np.uint8)
+            print(f"After uint8 - original shape: {original_uint8.shape}")
+            print(f"After uint8 - recon shape: {recon_uint8.shape}")
+            print(f"After uint8 - original min/max: {original_uint8.min()}/{original_uint8.max()}")
+            print(f"After uint8 - recon min/max: {recon_uint8.min()}/{recon_uint8.max()}")
 
             # Stack original and reconstruction side by side [T, H, W*2, C]
             combined = np.concatenate([original_uint8, recon_uint8], axis=2)
+            print(f"After concatenate - combined shape: {combined.shape}")
+            print(f"Expected shape: [T={original.shape[0]}, H={original.shape[2]}, W={original.shape[3]*2}, C=3]")
+
+            # Validate the shape is correct
+            if len(combined.shape) != 4:
+                print(f"ERROR: Combined shape has {len(combined.shape)} dimensions, expected 4!")
+            elif combined.shape[3] != 3:
+                print(f"ERROR: Last dimension is {combined.shape[3]}, expected 3 (RGB channels)!")
+            else:
+                print(f"Shape looks correct for wandb.Video: [frames={combined.shape[0]}, height={combined.shape[1]}, width={combined.shape[2]}, channels={combined.shape[3]}]")
+
+            # Additional check: ensure the array is contiguous in memory
+            if not combined.flags['C_CONTIGUOUS']:
+                print("Warning: Array is not C-contiguous, making it contiguous...")
+                combined = np.ascontiguousarray(combined)
+
+            # Debug: Save first frame as image to verify content
+            if idx == 0:  # Only for the first video sample
+                from PIL import Image
+                test_frame = combined[0]  # First frame [H, W, C]
+                test_image_path = os.path.join(self.visualization_dir, f'debug_video_frame_{idx}.png')
+                Image.fromarray(test_frame).save(test_image_path)
+                print(f"Saved test frame to {test_image_path} for visual inspection")
+                print(f"Test frame shape: {test_frame.shape}, min: {test_frame.min()}, max: {test_frame.max()}")
+
+            print(f"=== End Debug ===\n")
 
             # Create wandb.Video
-            video = wandb_module.Video(combined, fps=fps, format="mp4", caption=f"Sample {idx}: Original (left) vs Reconstruction (right)")
+            # Try creating video with current shape first
+            video_created = False
+            try:
+                video = wandb_module.Video(combined, fps=fps, format="mp4", caption=f"Sample {idx}: Original (left) vs Reconstruction (right)")
+                print(f"Successfully created video with shape {combined.shape}")
+                video_created = True
+            except Exception as e:
+                print(f"Error creating video with shape {combined.shape}: {e}")
+
+            # If first attempt failed, try alternative approaches
+            if not video_created:
+                print("Trying alternative approaches...")
+
+                # Approach 1: Try saving video to file first using imageio
+                try:
+                    import imageio
+                    video_path = os.path.join(self.visualization_dir, f'debug_video_{idx}.mp4')
+                    writer = imageio.get_writer(video_path, fps=fps)
+                    for frame in combined:
+                        writer.append_data(frame)
+                    writer.close()
+                    print(f"Saved video to {video_path}")
+                    # Use the file path for wandb.Video
+                    video = wandb_module.Video(video_path, caption=f"Sample {idx}: Original (left) vs Reconstruction (right)")
+                    video_created = True
+                except ImportError:
+                    print("imageio not available, trying alternative shape ordering...")
+                except Exception as e:
+                    print(f"Error saving video with imageio: {e}")
+
+                # Approach 2: Try alternative shape ordering
+                if not video_created:
+                    try:
+                        # Try [T, C, H, W] format instead of [T, H, W, C]
+                        combined_alt = combined.transpose(0, 3, 1, 2)  # [T, H, W, C] -> [T, C, H, W]
+                        print(f"Trying alternative shape: {combined_alt.shape}")
+                        video = wandb_module.Video(combined_alt, fps=fps, format="mp4", caption=f"Sample {idx}: Original (left) vs Reconstruction (right) (alt format)")
+                        video_created = True
+                    except Exception as e:
+                        print(f"Error with alternative shape: {e}")
+                        # Last resort: just use the original combined array
+                        video = wandb_module.Video(combined, fps=fps, format="mp4", caption=f"Sample {idx}: Failed video creation")
+
             videos.append(video)
 
         # Log all videos
