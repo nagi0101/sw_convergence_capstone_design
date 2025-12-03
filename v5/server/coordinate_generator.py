@@ -192,9 +192,6 @@ class PatternRecognizer(nn.Module):
                     'size': (len(u_vals), len(v_vals))
                 }
         
-        # Check for clustering
-        from torch.cluster import KMeans if hasattr(torch, 'cluster') else None
-        
         # Simple clustering check: compute mean distance to centroid
         centroid = coordinates.mean(dim=0)
         distances = (coordinates - centroid).norm(dim=1)

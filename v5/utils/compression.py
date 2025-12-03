@@ -19,13 +19,19 @@ def compress_packet(
     Compress pixel data for network transmission.
     
     Args:
-        frame_idx: Frame index
-        coordinates: Pixel coordinates [N, 2]
-        pixel_values: RGB values [N, 3] float32
-        compression_level: zlib compression level
+        frame_idx: Frame index (non-negative integer)
+        coordinates: Pixel coordinates [N, 2] with uint16-compatible values (0-65535).
+            Shape must be (N, 2) where N is the number of pixels.
+        pixel_values: RGB values [N, 3] as float32 in range [0.0, 1.0].
+            Shape must be (N, 3) where N matches coordinates.
+        compression_level: zlib compression level (1-9, default 1 for speed)
         
     Returns:
-        Compressed bytes
+        Compressed bytes ready for network transmission
+        
+    Note:
+        Coordinates are packed as uint16 (2 bytes each).
+        RGB values are quantized to uint8 (0-255).
     """
     num_pixels = len(coordinates)
     
