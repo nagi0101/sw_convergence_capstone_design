@@ -1,0 +1,55 @@
+# SGAPS-MAE Configuration
+defaults:
+  - _self_
+
+# Model settings
+model:
+  image_size: 224
+  pixel_embed_dim: 384
+  pos_embed_dim: 384
+  hidden_dim: 768
+  output_dim: 768
+  num_gat_layers: 6
+  num_heads: 8
+  knn_k: 8
+  diffusion_steps: 10
+  sampling_budget: 500
+  dropout: 0.1
+
+# Data settings
+data:
+  data_root: "../smbdataset/data-smb"
+  image_size: 224
+  batch_size: 8
+  num_workers: 4
+
+# Training settings
+training:
+  num_epochs: 500
+  learning_rate: 1.5e-4
+  min_lr: 1.0e-6
+  weight_decay: 0.05
+  gradient_clip: 1.0
+  val_interval: 5
+  save_interval: 10
+  seed: 42
+
+# Loss weights
+loss:
+  sampled_weight: 0.3
+  perceptual_weight: 0.4
+  structural_weight: 0.2
+  temporal_weight: 0.1
+
+# Logging
+logging:
+  log_dir: "results/tensorboard"
+  checkpoint_dir: "results/checkpoints"
+  log_interval: 10
+
+# Server settings
+server:
+  host: "0.0.0.0"
+  port: 8888
+  max_sessions: 10000
+  sampling_budget: 500
