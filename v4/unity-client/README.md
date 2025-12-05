@@ -21,8 +21,7 @@ This package requires:
 1. Add an empty GameObject to your scene
 2. Add the `SGAPSManager` component
 3. Configure the server endpoint (default: `ws://localhost:8000/ws/stream`)
-4. Set your capture resolution and target FPS
-5. Press Play and click Connect (or enable "Connect On Start")
+4. Press Play and click Connect (or enable "Connect On Start")
 
 ## Components
 
@@ -82,16 +81,30 @@ SGAPSManager
 
 ## Protocol Flow
 
-1. Client connects to server via WebSocket
-2. Client sends `session_start` with `checkpoint_key` and `resolution`
-3. Server responds with `session_start_ack` containing:
-    - `sample_count` (server-controlled)
-    - `max_state_dim` (server-controlled)
-    - `resolution`
-4. Client initializes PixelSampler and StateVectorCollector with server values
-5. Server sends initial `uv_coordinates`
-6. Client captures frames and sends `frame_data`
-7. Server responds with updated `uv_coordinates` for next frame
+```mermaid
+sequenceDiagram
+    participant C as Unity Client
+    participant S as SGAPS Server
+
+    C->>S: Connect WebSocket
+    S->>C: connection_ack
+    C->>S: session_start (checkpoint_key, resolution)
+    S->>C: session_start_ack (sample_count, max_state_dim, target_fps, sentinel_value)
+    S->>C: uv_coordinates (initial)
+
+    loop Every Frame
+        C->>S: frame_data (pixels, state_vector)
+        S->>C: uv_coordinates (for next frame)
+    end
+```
+
+**session_start_ack contains (all server-controlled):**
+
+-   `sample_count`: Number of pixels to sample
+-   `max_state_dim`: State vector dimension
+-   `target_fps`: Capture frame rate
+-   `sentinel_value`: Padding for unused state dimensions
+-   `resolution`: Confirmed screen resolution
 
 ## License
 

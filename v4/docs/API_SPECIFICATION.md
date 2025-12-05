@@ -225,7 +225,6 @@ ws://server:8080/ws/stream?session_id=550e8400-e29b-41d4-a716-446655440000
     "type": "session_start",
     "payload": {
         "checkpoint_key": "mario_world1",
-        "max_state_dim": 64,
         "resolution": [640, 480]
     }
 }
@@ -234,8 +233,10 @@ ws://server:8080/ws/stream?session_id=550e8400-e29b-41d4-a716-446655440000
 **필드 설명**:
 
 -   `checkpoint_key` (string): 모델 체크포인트 식별자. 같은 키는 같은 모델을 사용하며, 미등록 시 "default" 사용
--   `max_state_dim` (int): 상태 벡터 최대 길이 (기본값 64)
--   `resolution` (int[2]): [width, height]
+-   `resolution` (int[2]): [width, height] - 클라이언트 화면 해상도
+
+> **Note**: `sample_count`, `max_state_dim`, `target_fps`, `sentinel_value`는 서버에서 제어하는 파라미터입니다.
+> 클라이언트는 `session_start_ack`에서 이 값들을 받아 사용합니다.
 
 서버 응답:
 
@@ -245,10 +246,28 @@ ws://server:8080/ws/stream?session_id=550e8400-e29b-41d4-a716-446655440000
     "payload": {
         "checkpoint_key": "mario_world1",
         "checkpoint_loaded": true,
-        "model_version": "v1.0.0"
+        "model_version": "v1.0.0",
+        "sample_count": 500,
+        "max_state_dim": 64,
+        "target_fps": 10,
+        "sentinel_value": -999.0,
+        "resolution": [640, 480]
     }
 }
 ```
+
+**응답 필드 설명**:
+
+-   `checkpoint_key` (string): 사용될 체크포인트 키
+-   `checkpoint_loaded` (bool): 체크포인트 로드 성공 여부
+-   `model_version` (string): 모델 버전
+-   `sample_count` (int): 프레임당 샘플링할 픽셀 수 **(서버 제어)**
+-   `max_state_dim` (int): 상태 벡터 최대 차원 **(서버 제어)**
+-   `target_fps` (int): 목표 캡처 FPS **(서버 제어)**
+-   `sentinel_value` (float): 미사용 상태 차원의 패딩 값 **(서버 제어)**
+-   `resolution` (int[2]): 확인된 해상도
+
+````
 
 ---
 
@@ -261,7 +280,7 @@ ws://server:8080/ws/stream?session_id=550e8400-e29b-41d4-a716-446655440000
   "type": "message_type",
   "payload": { ... }
 }
-```
+````
 
 ---
 

@@ -94,11 +94,14 @@ using UnityEngine;
 using System;
 using System.Collections;
 
-namespace SGAPS.Runtime
+namespace SGAPS.Runtime.Core
 {
     /// <summary>
     /// SGAPS 시스템의 메인 관리 클래스
     /// Scene에 추가하여 서버와 통신하며 프레임 캡처/전송을 관리
+    ///
+    /// 주요 파라미터(sample_count, max_state_dim, target_fps, sentinel_value)는
+    /// 서버에서 제어하며, session_start_ack에서 수신하여 사용합니다.
     /// </summary>
     public class SGAPSManager : MonoBehaviour
     {
@@ -106,48 +109,41 @@ namespace SGAPS.Runtime
 
         [Header("Server Connection")]
         [Tooltip("WebSocket server endpoint (e.g., ws://server.example.com:8080)")]
-        public string serverEndpoint = "ws://localhost:8080";
+        [SerializeField]
+        private string serverEndpoint = "ws://localhost:8000/ws/stream";
 
-        [Tooltip("자동으로 시작 시 서버 연결 시도")]
-        public bool connectOnStart = true;
-
-        [Header("Capture Settings")]
-        [Tooltip("캡처할 카메라 (null이면 Camera.main 사용)")]
-        public Camera targetCamera;
-
-        [Tooltip("캡처 해상도 (width, height)")]
-        public Vector2Int captureResolution = new Vector2Int(640, 480);
-
-        [Tooltip("목표 캡처 프레임레이트 (FPS)")]
-        [Range(1, 60)]
-        public int targetFPS = 10;
-
-        [Header("Sampling Settings")]
-        [Tooltip("초기 샘플링 패턴 (서버로부터 받기 전까지 사용)")]
-        public SamplingPattern initialPattern = SamplingPattern.UniformGrid;
-
-        [Tooltip("초기 샘플링 픽셀 개수")]
-        [Range(100, 5000)]
-        public int initialSampleCount = 400;
-
-        [Header("State Vector")]
-        [Tooltip("상태 벡터 최대 길이 (서버와 동일해야 함)")]
-        public int maxStateDim = 64;
-
-        [Tooltip("미사용 인덱스의 sentinel 값")]
-        public float sentinelValue = -999.0f;
-
-        [Header("Checkpoint")]
         [Tooltip("모델 체크포인트 식별자 (게임/맵별로 다른 모델 사용 시 변경)")]
-        public string checkpointKey = "default";
+        [SerializeField]
+        private string checkpointKey = "default";
 
-        [Header("Performance")]
-        [Tooltip("성능 모니터링 활성화")]
-        public bool enablePerformanceMonitoring = true;
+        [Header("Behavior")]
+        [Tooltip("자동으로 시작 시 서버 연결 시도")]
+        [SerializeField]
+        private bool connectOnStart = false;
 
         [Tooltip("디버그 패널 표시")]
-        public bool showDebugPanel = false;
+        [SerializeField]
+        private bool showDebugPanel = false;
 
+        #endregion
+
+        #region Runtime Fields (Server-Controlled)
+
+        // 아래 값들은 서버에서 session_start_ack를 통해 전달받습니다.
+        // 클라이언트는 이 값들을 직접 설정하지 않습니다.
+        private int sampleCount = 500;      // 서버 제어: 프레임당 샘플 픽셀 수
+        private int maxStateDim = 64;       // 서버 제어: 상태 벡터 최대 차원
+        private int targetFPS = 10;         // 서버 제어: 캡처 FPS
+        private float sentinelValue = -999.0f;  // 서버 제어: 미사용 상태 패딩 값
+
+        #endregion
+
+        #region Private Fields
+
+        private FrameCaptureHandler frameCaptureHandler;
+        private PixelSampler pixelSampler;
+        private NetworkClient networkClient;
+        private StateVectorCollector stateVectorCollector;
         #endregion
 
         #region Private Fields
@@ -159,7 +155,7 @@ namespace SGAPS.Runtime
         private StateVectorCollector stateVectorCollector;
 
         private UVCoordinates currentUVCoordinates;
-        private float nextCaptureTime;
+        private Coroutine captureCoroutine;
         private ulong frameCounter;
 
         private bool isInitialized = false;
@@ -185,14 +181,8 @@ namespace SGAPS.Runtime
 
         private void Update()
         {
-            if (!isInitialized || !isCapturing) return;
-
-            // FPS 제어
-            if (Time.time >= nextCaptureTime)
-            {
-                CaptureAndSendFrame();
-                nextCaptureTime = Time.time + (1f / targetFPS);
-            }
+            // MainThreadDispatcher로 메인 스레드 콜백 처리
+            MainThreadDispatcher.ProcessQueue();
         }
 
         private void OnDestroy()
@@ -206,50 +196,41 @@ namespace SGAPS.Runtime
 
         private void ValidateSettings()
         {
-            if (targetCamera == null)
-            {
-                targetCamera = Camera.main;
-                if (targetCamera == null)
-                {
-                    Debug.LogError("[SGAPS] No camera found! Please assign a camera.");
-                }
-            }
-
             if (string.IsNullOrEmpty(serverEndpoint))
             {
-                Debug.LogWarning("[SGAPS] Server endpoint not set. Using default: ws://localhost:8080");
-                serverEndpoint = "ws://localhost:8080";
+                serverEndpoint = "ws://localhost:8000/ws/stream";
             }
         }
 
         private void InitializeComponents()
         {
-            // 1. Frame Capture Handler
-            captureHandler = new FrameCaptureHandler(
-                targetCamera,
-                captureResolution
-            );
-
-            // 2. Pixel Sampler
-            pixelSampler = new PixelSampler(initialSampleCount);
-            currentUVCoordinates = pixelSampler.GenerateInitialPattern(initialPattern);
-
-            // 3. State Vector Collector
-            stateVectorCollector = new StateVectorCollector(maxStateDim, sentinelValue);
-
-            // 4. Network Client
-            networkClient = new NetworkClient(serverEndpoint, checkpointKey, maxStateDim, captureResolution);
-            networkClient.OnUVCoordinatesReceived += HandleUVCoordinatesReceived;
-            networkClient.OnConnectionStatusChanged += HandleConnectionStatusChanged;
-
-            // 5. Performance Monitor
-            if (enablePerformanceMonitoring)
+            try
             {
-                performanceMonitor = new PerformanceMonitor();
-            }
+                // 1. Frame Capture Handler (ScreenCapture API 사용 - 카메라 불필요)
+                frameCaptureHandler = new FrameCaptureHandler();
 
-            isInitialized = true;
-            Debug.Log("[SGAPS] Components initialized successfully.");
+                // 2. PixelSampler와 StateVectorCollector는 서버 설정 수신 후 초기화
+                //    session_start_ack에서 sample_count, max_state_dim 등을 받아야 함
+                pixelSampler = null;
+                stateVectorCollector = null;
+                currentUVCoordinates = null;
+
+                // 3. Network Client (서버 제어 파라미터는 전달하지 않음)
+                networkClient = new NetworkClient(serverEndpoint, checkpointKey);
+                networkClient.OnConnected += HandleConnected;
+                networkClient.OnDisconnected += HandleDisconnected;
+                networkClient.OnSessionStarted += HandleSessionStarted;
+                networkClient.OnUVCoordinatesReceived += HandleUVCoordinatesReceived;
+                networkClient.OnError += HandleError;
+
+                isInitialized = true;
+                Debug.Log("[SGAPS] Components initialized. Waiting for server config.");
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[SGAPS] Initialization failed: {ex.Message}");
+                isInitialized = false;
+            }
         }
 
         #endregion
@@ -261,9 +242,15 @@ namespace SGAPS.Runtime
         /// </summary>
         public async void ConnectToServer()
         {
-            if (networkClient == null)
+            if (!isInitialized)
             {
-                Debug.LogError("[SGAPS] NetworkClient not initialized!");
+                Debug.LogError("[SGAPS] Cannot connect: not initialized.");
+                return;
+            }
+
+            if (networkClient.IsConnected)
+            {
+                Debug.LogWarning("[SGAPS] Already connected to server.");
                 return;
             }
 
@@ -272,12 +259,64 @@ namespace SGAPS.Runtime
 
             if (success)
             {
-                Debug.Log("[SGAPS] Connected to server successfully.");
-                StartCapture();
+                // session_start 전송 - 서버가 설정값으로 응답
+                networkClient.SendSessionStart();
+                // 캡처는 HandleSessionStarted에서 시작됨
             }
             else
             {
                 Debug.LogError("[SGAPS] Failed to connect to server.");
+            }
+        }
+
+        #endregion
+
+        #region Event Handlers
+
+        private void HandleConnected()
+        {
+            Debug.Log("[SGAPS] Connected to server. Waiting for session config...");
+        }
+
+        private void HandleDisconnected()
+        {
+            Debug.Log("[SGAPS] Disconnected from server.");
+            StopCapturing();
+        }
+
+        /// <summary>
+        /// session_start_ack 수신 시 호출 - 서버 설정값으로 컴포넌트 초기화
+        /// </summary>
+        private void HandleSessionStarted(SessionConfig config)
+        {
+            Debug.Log($"[SGAPS] Session started with server config: {config}");
+
+            // 서버 제어 파라미터 적용
+            sampleCount = config.SampleCount;
+            maxStateDim = config.MaxStateDim;
+            targetFPS = config.TargetFPS;
+            sentinelValue = config.SentinelValue;
+
+            // 서버 설정값으로 컴포넌트 초기화
+            pixelSampler = new PixelSampler(sampleCount);
+            currentUVCoordinates = pixelSampler.GenerateInitialPattern(SamplingPattern.UniformGrid);
+            stateVectorCollector = new StateVectorCollector(maxStateDim, sentinelValue);
+
+            Debug.Log($"[SGAPS] Initialized: sampleCount={sampleCount}, maxStateDim={maxStateDim}, " +
+                      $"targetFPS={targetFPS}");
+
+            // 캡처 시작
+            StartCapturing();
+        }
+
+        private void HandleUVCoordinatesReceived(UVCoordinates coords)
+        {
+            currentUVCoordinates = coords;
+        }
+
+        private void HandleError(string error)
+        {
+            Debug.LogError($"[SGAPS] Error: {error}");;
             }
         }
 

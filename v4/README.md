@@ -455,11 +455,46 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ### Unity 클라이언트
 
 1. Unity Package Manager에서 `unity-client` 폴더를 추가
-2. `SGAPSManager` 컴포넌트를 씩에 추가
+2. `SGAPSManager` 컴포넌트를 씬에 추가
 3. 서버 엔드포인트 설정 (`ws://localhost:8000/ws/stream`)
 4. Play 모드에서 자동 연결 또는 `ConnectToServer()` 호출
 
 자세한 내용은 [Unity Client README](unity-client/README.md) 참조
+
+### 서버-클라이언트 통신 프로토콜
+
+```mermaid
+sequenceDiagram
+    participant C as Unity Client
+    participant S as SGAPS Server
+
+    C->>S: WebSocket Connect
+    S->>C: connection_ack (client_id, server_version)
+
+    C->>S: session_start (checkpoint_key, resolution)
+    Note over S: 서버 설정에서 파라미터 로드
+    S->>C: session_start_ack
+    Note over C: sample_count, max_state_dim,<br/>target_fps, sentinel_value 수신
+
+    S->>C: uv_coordinates (initial)
+    Note over C: PixelSampler, StateVectorCollector 초기화<br/>캡처 시작
+
+    loop Every Frame (at target_fps)
+        C->>S: frame_data (pixels, state_vector)
+        S->>C: uv_coordinates (for next frame)
+    end
+
+    C->>S: Disconnect
+```
+
+**서버 제어 파라미터**: 다음 값들은 서버 설정(`conf/config.yaml`)에서 관리되며, `session_start_ack`를 통해 클라이언트에 전달됩니다:
+
+| 파라미터         | 설명                    | 기본값 |
+| ---------------- | ----------------------- | ------ |
+| `sample_count`   | 프레임당 샘플링 픽셀 수 | 500    |
+| `max_state_dim`  | 상태 벡터 최대 차원     | 64     |
+| `target_fps`     | 캡처 프레임 레이트      | 10     |
+| `sentinel_value` | 미사용 상태 패딩 값     | -999.0 |
 
 ### 학습 및 평가 (Phase 2 예정)
 

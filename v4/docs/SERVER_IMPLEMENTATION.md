@@ -147,12 +147,22 @@ async def websocket_endpoint(websocket: WebSocket):
             # 세션 시작 메시지 처리
             if data.get("type") == "session_start":
                 session_info = await handle_session_start(data["payload"], client_id)
+
+                # 서버 설정값 로드
+                cfg = get_server_config()
+
                 await websocket.send_json({
                     "type": "session_start_ack",
                     "payload": {
                         "checkpoint_key": session_info.checkpoint_key,
                         "checkpoint_loaded": session_info.checkpoint_loaded,
-                        "model_version": session_info.model_version
+                        "model_version": session_info.model_version,
+                        # 서버 제어 파라미터 - 클라이언트는 이 값들을 사용해야 함
+                        "sample_count": cfg.sampling.default_sample_count,
+                        "max_state_dim": cfg.max_state_dim,
+                        "target_fps": cfg.target_fps,
+                        "sentinel_value": cfg.sentinel_value,
+                        "resolution": list(session_info.resolution)
                     }
                 })
                 continue
