@@ -20,3 +20,14 @@ storage:
 reconstruction:
     method: "opencv_inpaint"
     inpaint_radius: 3
+
+# Model settings (Phase 2: Sparse Pixel Transformer)
+model:
+    embed_dim: 256 # 임베딩 차원
+    num_heads: 8 # Attention heads
+    num_encoder_layers: 6 # Sparse Transformer Encoder layers
+    num_decoder_layers: 4 # Cross-Attention Decoder layers
+    feedforward_dim: 1024 # FFN 중간 차원
+    dropout: 0.1
+    # Phase 1: Grayscale (1 channel), Phase 2+: RGB (3 channels)
+    color_channels: 1

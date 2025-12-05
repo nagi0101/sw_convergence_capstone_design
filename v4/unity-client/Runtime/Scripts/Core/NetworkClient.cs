@@ -404,10 +404,10 @@ namespace SGAPS.Runtime.Core
             string version = payload?["model_version"]?.ToString();
 
             // Server-controlled parameters - client MUST use these values
+            // Note: sentinel_value is server-internal (for padding) and NOT sent to client
             int sampleCount = payload?["sample_count"]?.ToObject<int>() ?? 500;
             int maxStateDim = payload?["max_state_dim"]?.ToObject<int>() ?? 64;
             int targetFPS = payload?["target_fps"]?.ToObject<int>() ?? 10;
-            float sentinelValue = payload?["sentinel_value"]?.ToObject<float>() ?? -999.0f;
 
             int[] resolutionArray = payload?["resolution"]?.ToObject<int[]>() ?? new int[] { Screen.width, Screen.height };
             Vector2Int resolution = new Vector2Int(resolutionArray[0], resolutionArray[1]);
@@ -423,7 +423,6 @@ namespace SGAPS.Runtime.Core
                 sampleCount: sampleCount,
                 maxStateDim: maxStateDim,
                 targetFPS: targetFPS,
-                sentinelValue: sentinelValue,
                 resolution: resolution
             );
 

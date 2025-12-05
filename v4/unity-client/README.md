@@ -89,7 +89,7 @@ sequenceDiagram
     C->>S: Connect WebSocket
     S->>C: connection_ack
     C->>S: session_start (checkpoint_key, resolution)
-    S->>C: session_start_ack (sample_count, max_state_dim, target_fps, sentinel_value)
+    S->>C: session_start_ack (sample_count, max_state_dim, target_fps)
     S->>C: uv_coordinates (initial)
 
     loop Every Frame
@@ -103,7 +103,6 @@ sequenceDiagram
 -   `sample_count`: Number of pixels to sample
 -   `max_state_dim`: State vector dimension
 -   `target_fps`: Capture frame rate
--   `sentinel_value`: Padding for unused state dimensions
 -   `resolution`: Confirmed screen resolution
 
 ## License

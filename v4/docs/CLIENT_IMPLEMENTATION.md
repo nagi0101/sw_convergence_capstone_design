@@ -100,8 +100,9 @@ namespace SGAPS.Runtime.Core
     /// SGAPS 시스템의 메인 관리 클래스
     /// Scene에 추가하여 서버와 통신하며 프레임 캡처/전송을 관리
     ///
-    /// 주요 파라미터(sample_count, max_state_dim, target_fps, sentinel_value)는
+    /// 주요 파라미터(sample_count, max_state_dim, target_fps)는
     /// 서버에서 제어하며, session_start_ack에서 수신하여 사용합니다.
+    /// Note: sentinel_value는 서버 내부에서만 사용되며 클라이언트에 전송되지 않습니다.
     /// </summary>
     public class SGAPSManager : MonoBehaviour
     {
@@ -134,7 +135,7 @@ namespace SGAPS.Runtime.Core
         private int sampleCount = 500;      // 서버 제어: 프레임당 샘플 픽셀 수
         private int maxStateDim = 64;       // 서버 제어: 상태 벡터 최대 차원
         private int targetFPS = 10;         // 서버 제어: 캡처 FPS
-        private float sentinelValue = -999.0f;  // 서버 제어: 미사용 상태 패딩 값
+        // Note: sentinel_value는 서버 내부 전용 (상태 벡터 패딩용), 클라이언트에 전송되지 않음
 
         #endregion
 
@@ -286,6 +287,7 @@ namespace SGAPS.Runtime.Core
 
         /// <summary>
         /// session_start_ack 수신 시 호출 - 서버 설정값으로 컴포넌트 초기화
+        /// Note: sentinel_value는 서버 내부용으로 클라이언트에 전송되지 않음
         /// </summary>
         private void HandleSessionStarted(SessionConfig config)
         {
@@ -295,12 +297,12 @@ namespace SGAPS.Runtime.Core
             sampleCount = config.SampleCount;
             maxStateDim = config.MaxStateDim;
             targetFPS = config.TargetFPS;
-            sentinelValue = config.SentinelValue;
+            // sentinel_value는 서버 내부에서만 사용 (상태 벡터 패딩용)
 
             // 서버 설정값으로 컴포넌트 초기화
             pixelSampler = new PixelSampler(sampleCount);
             currentUVCoordinates = pixelSampler.GenerateInitialPattern(SamplingPattern.UniformGrid);
-            stateVectorCollector = new StateVectorCollector(maxStateDim, sentinelValue);
+            stateVectorCollector = new StateVectorCollector(maxStateDim);
 
             Debug.Log($"[SGAPS] Initialized: sampleCount={sampleCount}, maxStateDim={maxStateDim}, " +
                       $"targetFPS={targetFPS}");

@@ -5,6 +5,7 @@ namespace SGAPS.Runtime.Data
     /// <summary>
     /// Session configuration received from the server.
     /// Contains server-controlled parameters that the client MUST use.
+    /// Note: sentinel_value is server-internal (used for padding state vectors) and not included here.
     /// </summary>
     [System.Serializable]
     public class SessionConfig
@@ -40,11 +41,6 @@ namespace SGAPS.Runtime.Data
         public int TargetFPS;
 
         /// <summary>
-        /// Sentinel value for unused state dimensions (server-controlled).
-        /// </summary>
-        public float SentinelValue;
-
-        /// <summary>
         /// Screen resolution to use for capture.
         /// </summary>
         public Vector2Int Resolution;
@@ -60,7 +56,6 @@ namespace SGAPS.Runtime.Data
             SampleCount = 500;
             MaxStateDim = 64;
             TargetFPS = 10;
-            SentinelValue = -999.0f;
             Resolution = new Vector2Int(640, 480);
         }
 
@@ -74,7 +69,6 @@ namespace SGAPS.Runtime.Data
             int sampleCount,
             int maxStateDim,
             int targetFPS,
-            float sentinelValue,
             Vector2Int resolution)
         {
             CheckpointKey = checkpointKey ?? "default";
@@ -83,7 +77,6 @@ namespace SGAPS.Runtime.Data
             SampleCount = sampleCount;
             MaxStateDim = maxStateDim;
             TargetFPS = targetFPS;
-            SentinelValue = sentinelValue;
             Resolution = resolution;
         }
 

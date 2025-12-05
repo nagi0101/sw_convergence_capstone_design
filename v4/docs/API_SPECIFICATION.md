@@ -235,8 +235,9 @@ ws://server:8080/ws/stream?session_id=550e8400-e29b-41d4-a716-446655440000
 -   `checkpoint_key` (string): 모델 체크포인트 식별자. 같은 키는 같은 모델을 사용하며, 미등록 시 "default" 사용
 -   `resolution` (int[2]): [width, height] - 클라이언트 화면 해상도
 
-> **Note**: `sample_count`, `max_state_dim`, `target_fps`, `sentinel_value`는 서버에서 제어하는 파라미터입니다.
+> **Note**: `sample_count`, `max_state_dim`, `target_fps`는 서버에서 제어하는 파라미터입니다.
 > 클라이언트는 `session_start_ack`에서 이 값들을 받아 사용합니다.
+> `sentinel_value`는 서버 내부에서 상태 벡터 패딩에 사용되며, 클라이언트에 전송되지 않습니다.
 
 서버 응답:
 
@@ -250,7 +251,6 @@ ws://server:8080/ws/stream?session_id=550e8400-e29b-41d4-a716-446655440000
         "sample_count": 500,
         "max_state_dim": 64,
         "target_fps": 10,
-        "sentinel_value": -999.0,
         "resolution": [640, 480]
     }
 }
@@ -264,8 +264,9 @@ ws://server:8080/ws/stream?session_id=550e8400-e29b-41d4-a716-446655440000
 -   `sample_count` (int): 프레임당 샘플링할 픽셀 수 **(서버 제어)**
 -   `max_state_dim` (int): 상태 벡터 최대 차원 **(서버 제어)**
 -   `target_fps` (int): 목표 캡처 FPS **(서버 제어)**
--   `sentinel_value` (float): 미사용 상태 차원의 패딩 값 **(서버 제어)**
 -   `resolution` (int[2]): 확인된 해상도
+
+> **Note**: `sentinel_value`는 클라이언트에 전송되지 않습니다. 서버에서 상태 벡터 저장 시 `max_state_dim`까지 패딩하는 데 사용하는 내부 값입니다.
 
 ````
 

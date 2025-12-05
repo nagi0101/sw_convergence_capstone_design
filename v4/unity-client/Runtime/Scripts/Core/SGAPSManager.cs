@@ -39,7 +39,10 @@ namespace SGAPS.Runtime.Core
         private int sampleCount = 500;
         private int maxStateDim = 64;
         private int targetFPS = 10;
-        private float sentinelValue = -999.0f;
+
+        // Sentinel value is server-internal for state vector padding
+        // Client uses a constant default for uninitialized state (if needed locally)
+        private const float DEFAULT_STATE_VALUE = 0f;
 
         #endregion
 
@@ -343,16 +346,17 @@ namespace SGAPS.Runtime.Core
             sampleCount = config.SampleCount;
             maxStateDim = config.MaxStateDim;
             targetFPS = config.TargetFPS;
-            sentinelValue = config.SentinelValue;
+            // Note: sentinel_value is server-internal for padding, not sent to client
 
             // Initialize components with server-provided values
             pixelSampler = new PixelSampler(sampleCount);
             currentUVCoordinates = pixelSampler.GenerateInitialPattern(SamplingPattern.UniformGrid);
 
-            stateVectorCollector = new StateVectorCollector(maxStateDim, sentinelValue);
+            // StateVectorCollector uses default value for unset states (0 by default)
+            stateVectorCollector = new StateVectorCollector(maxStateDim);
 
             Debug.Log($"[SGAPS] Initialized with sampleCount={sampleCount}, maxStateDim={maxStateDim}, " +
-                      $"targetFPS={targetFPS}, sentinelValue={sentinelValue}");
+                      $"targetFPS={targetFPS}");
 
             // Now we can start capturing
             StartCapturing();

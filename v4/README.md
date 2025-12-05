@@ -19,38 +19,45 @@ SGAPS-MAE는 게임 세션 리플레이를 위한 혁신적인 픽셀 단위 적
 flowchart TB
     subgraph Client["클라이언트 (극경량)"]
         GameFrame["게임 프레임<br/>256×240 RGB"]
+        GameState["게임 상태<br/>State Vector"]
         PixelExtractor["픽셀 추출기<br/>coords[u,v] → pixels"]
+        StateCollector["상태 수집기<br/>StateVectorCollector"]
         Compressor["압축<br/>zlib + msgpack"]
 
         GameFrame --> PixelExtractor
+        GameState --> StateCollector
         PixelExtractor --> Compressor
+        StateCollector --> Compressor
     end
 
     subgraph Network["네트워크"]
-        Upload["상행: 2KB/frame<br/>60KB/s @ 30fps"]
-        Download["하행: 0.5KB/frame<br/>15KB/s @ 30fps"]
+        Upload["상행: 2KB/frame<br/>pixels + state_vector"]
+        Download["하행: 0.5KB/frame<br/>UV 좌표"]
     end
 
     subgraph Server["서버 (모든 지능)"]
         PixelDecoder["픽셀 디코더"]
-        SparseEncoder["Sparse Pixel Encoder<br/>Graph Neural Network"]
-        InfoDiffusion["Information Diffusion<br/>Sparse → Dense"]
+        StateEncoder["State Vector Encoder<br/>게임 컨텍스트 인코딩"]
+        SparseTransformer["Sparse Pixel Transformer<br/>Self-Attention Encoder"]
+        CrossAttention["Cross-Attention Decoder<br/>Query Grid → Dense"]
         QualityAnalyzer["품질 분석기<br/>Uncertainty Estimation"]
         CoordGenerator["좌표 생성기<br/>Top-N Importance"]
-        MemoryBank["Temporal Memory Bank<br/>Static/Dynamic"]
+        CNNHead["CNN Refinement Head<br/>최종 복원"]
     end
 
-    Compressor -->|"2KB"| Upload
+    Compressor -->|"pixels + state"| Upload
     Upload --> PixelDecoder
+    Upload --> StateEncoder
 
-    PixelDecoder --> SparseEncoder
-    SparseEncoder --> InfoDiffusion
-    MemoryBank --> InfoDiffusion
-    InfoDiffusion --> QualityAnalyzer
+    PixelDecoder --> SparseTransformer
+    StateEncoder --> CrossAttention
+    SparseTransformer --> CrossAttention
+    CrossAttention --> CNNHead
+    CNNHead --> QualityAnalyzer
     QualityAnalyzer --> CoordGenerator
 
     CoordGenerator --> Download
-    Download -->|"0.5KB<br/>coords[(u,v)...]"| PixelExtractor
+    Download -->|"coords[(u,v)...]"| PixelExtractor
 
     style Client fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
     style Server fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
@@ -119,83 +126,104 @@ flowchart LR
     style Frame_t2 fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
 ```
 
-### Sparse Pixel Encoder 아키텍처
+### Sparse Pixel Transformer 아키텍처
+
+> **Note**: Phase 1에서는 Grayscale(1채널)로 시작하며, Phase 2에서 컬러(RGB/YCbCr) 지원을 추가합니다.
+> 임베딩 차원, 레이어 수 등은 `config.yaml`에서 설정 가능합니다.
 
 ```mermaid
 graph TB
     subgraph Input["입력"]
-        PixelValues["픽셀 값<br/>[N, 3] RGB"]
+        PixelValues["픽셀 값<br/>[N, 1] Grayscale"]
         PixelPositions["픽셀 위치<br/>[N, 2] (u,v)"]
+        StateVector["상태 벡터<br/>[max_state_dim]"]
     end
 
-    subgraph Encoding["인코딩"]
-        PixelEnc["Pixel Encoder<br/>Linear(3, 384)"]
-        PosEnc["Continuous Position<br/>Encoding(384)"]
-        Concat["Concatenate<br/>[N, 768]"]
+    subgraph Embedding["임베딩 (configurable)"]
+        PixelEmbed["Pixel Embedding<br/>Linear(3, embed_dim)"]
+        PosEnc["Continuous Position<br/>Encoding(embed_dim)"]
+        StateEnc["State Vector Encoder<br/>MLP → embed_dim"]
+        PixelWithPos["Pixel + Position<br/>[N, embed_dim]"]
     end
 
-    subgraph GraphProcessing["Graph Neural Network"]
-        KNNGraph["KNN Graph 구성<br/>k=8 neighbors"]
-        GAT1["Graph Attention Layer 1<br/>768→768, 8 heads"]
-        GAT2["Graph Attention Layer 2<br/>768→768, 8 heads"]
-        GAT3["Graph Attention Layer 3<br/>768→768, 8 heads"]
-        GAT4["Graph Attention Layer 4<br/>768→768, 8 heads"]
-        GAT5["Graph Attention Layer 5<br/>768→768, 8 heads"]
-        GAT6["Graph Attention Layer 6<br/>768→768, 8 heads"]
+    subgraph TransformerEncoder["Sparse Transformer Encoder"]
+        SelfAttn1["Self-Attention Layer 1<br/>embed_dim, num_heads"]
+        SelfAttn2["Self-Attention Layer 2"]
+        SelfAttnN["...<br/>num_encoder_layers"]
+        SparseFeatures["Sparse Features<br/>[N, embed_dim]"]
     end
 
-    subgraph Diffusion["Information Diffusion"]
-        InitGrid["빈 그리드 초기화<br/>[224, 224, 768]"]
-        PlaceSparse["희소 특징 배치"]
-        AnisotropicDiff["Anisotropic Diffusion<br/>경계 보존 확산"]
-        Gradient["그래디언트 계산"]
-        Conductance["Conductance 맵<br/>1/(1+∇²)"]
-        Laplacian["Laplacian 연산"]
-        NonlinearTrans["비선형 변환<br/>10 iterations"]
+    subgraph CrossAttentionDecoder["Cross-Attention Decoder"]
+        QueryGrid["Query Grid 생성<br/>[H×W, 2] 전체 픽셀 좌표"]
+        QueryEmbed["Query Embedding<br/>[H×W, embed_dim]"]
+        CrossAttn1["Cross-Attention Layer 1<br/>Query: Grid, K/V: Sparse"]
+        CrossAttn2["Cross-Attention Layer 2"]
+        CrossAttnN["...<br/>num_decoder_layers"]
+        StatePixelAttn["State-Pixel<br/>Cross-Attention"]
+        DenseFeatures["Dense Features<br/>[H×W, embed_dim]"]
+    end
+
+    subgraph CNNHead["CNN Refinement Head"]
+        Reshape["Reshape<br/>[H, W, embed_dim]"]
+        Conv1["Conv2d(embed_dim, 128)"]
+        Conv2["Conv2d(128, 64)"]
+        Conv3["Conv2d(64, 1)"]
+        Sigmoid["Sigmoid()"]
     end
 
     subgraph Output["출력"]
-        DenseFeatures["Dense Feature Map<br/>[224, 224, 768]"]
-        Decoder["Lightweight Decoder<br/>4 Transformer Blocks"]
-        ReconstructedFrame["복원된 프레임<br/>[224, 224, 3]"]
+        ReconstructedFrame["복원된 프레임<br/>[H, W, 1] Grayscale"]
     end
 
-    PixelValues --> PixelEnc
+    PixelValues --> PixelEmbed
     PixelPositions --> PosEnc
-    PixelEnc --> Concat
-    PosEnc --> Concat
+    PixelEmbed --> PixelWithPos
+    PosEnc --> PixelWithPos
+    StateVector --> StateEnc
 
-    Concat --> KNNGraph
-    PixelPositions --> KNNGraph
+    PixelWithPos --> SelfAttn1
+    SelfAttn1 --> SelfAttn2
+    SelfAttn2 --> SelfAttnN
+    SelfAttnN --> SparseFeatures
 
-    KNNGraph --> GAT1
-    GAT1 --> GAT2
-    GAT2 --> GAT3
-    GAT3 --> GAT4
-    GAT4 --> GAT5
-    GAT5 --> GAT6
+    PixelPositions --> QueryGrid
+    QueryGrid --> QueryEmbed
+    QueryEmbed --> CrossAttn1
+    SparseFeatures --> CrossAttn1
+    CrossAttn1 --> CrossAttn2
+    CrossAttn2 --> CrossAttnN
+    CrossAttnN --> StatePixelAttn
+    StateEnc --> StatePixelAttn
+    StatePixelAttn --> DenseFeatures
 
-    GAT6 --> PlaceSparse
-    InitGrid --> PlaceSparse
-    PlaceSparse --> AnisotropicDiff
-
-    AnisotropicDiff --> Gradient
-    Gradient --> Conductance
-    Conductance --> Laplacian
-    Laplacian --> NonlinearTrans
-    NonlinearTrans --> AnisotropicDiff
-    NonlinearTrans --> DenseFeatures
-
-    DenseFeatures --> Decoder
-    Decoder --> ReconstructedFrame
+    DenseFeatures --> Reshape
+    Reshape --> Conv1
+    Conv1 --> Conv2
+    Conv2 --> Conv3
+    Conv3 --> Sigmoid
+    Sigmoid --> ReconstructedFrame
 
     style Input fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
-    style GraphProcessing fill:#f3e5f5,stroke:#4a148c,stroke-width:2px
-    style Diffusion fill:#fff3e0,stroke:#ef6c00,stroke-width:2px
-    style Output fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
+    style TransformerEncoder fill:#f3e5f5,stroke:#4a148c,stroke-width:2px
+    style CrossAttentionDecoder fill:#fff3e0,stroke:#ef6c00,stroke-width:2px
+    style CNNHead fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
 ```
 
-### Temporal Memory Bank 구조
+**모델 설정** (`config.yaml`):
+
+```yaml
+model:
+    embed_dim: 256 # 임베딩 차원 (configurable)
+    num_heads: 8 # Attention heads
+    num_encoder_layers: 6 # Sparse Transformer Encoder layers
+    num_decoder_layers: 4 # Cross-Attention Decoder layers
+    max_state_dim: 64 # 상태 벡터 최대 차원
+```
+
+### Temporal Memory Bank 구조 (Phase 2+ 예정)
+
+> **Note**: Temporal Memory Bank는 Phase 2 이후 적응적 샘플링 구현 시 추가될 예정입니다.
+> 현재 Phase 1에서는 고정된 UV 좌표 샘플링을 사용합니다.
 
 ```mermaid
 flowchart TB
@@ -251,7 +279,16 @@ flowchart TB
 
 ## 핵심 구성요소
 
-### 1. 서버 예측 오차 기반 픽셀 중요도 계산
+### 1. Sparse Pixel Transformer
+
+희소 픽셀 집합에서 전체 프레임을 복원하는 Transformer 기반 모델:
+
+-   **Self-Attention Encoder**: 희소 픽셀 간의 관계 학습 (O(N²) 복잡도, N은 작아 효율적)
+-   **Cross-Attention Decoder**: Query Grid로 전체 프레임 위치 복원
+-   **State-Pixel Cross-Attention**: 게임 상태와 픽셀 특징 결합
+-   **CNN Refinement Head**: 최종 복원 품질 향상
+
+### 2. 서버 예측 오차 기반 픽셀 중요도 계산
 
 서버는 복원 품질을 자체 평가하여 다음 프레임에 필요한 픽셀을 결정합니다:
 
@@ -259,14 +296,6 @@ flowchart TB
 -   **Attention 가중치 분석**: 정보 부족 영역 식별
 -   **시간적 일관성 검사**: 프레임 간 불일치 영역 탐지
 -   **종합 중요도 맵**: 가중 평균으로 최종 중요도 계산
-
-### 2. Information Diffusion Module
-
-희소 픽셀에서 전체 이미지로 정보를 확산시키는 핵심 모듈:
-
--   **Anisotropic Diffusion**: 경계를 보존하면서 정보 확산
--   **그래디언트 기반 Conductance**: 경계에서 낮은 확산율
--   **학습 가능한 비선형 변환**: 10회 반복으로 최적 확산
 
 ### 3. 계층적 샘플링 예산 할당
 
@@ -364,42 +393,33 @@ L_total = 0.3 × L_sampled + 0.4 × L_perceptual + 0.2 × L_structural + 0.1 × 
 ## 프로젝트 구조
 
 ```
-v5/
+v4/
 ├── README.md                    # 프로젝트 문서 (본 파일)
-├── requirements.txt             # 의존성 패키지
-├── models/                      # 모델 아키텍처
-│   ├── __init__.py
-│   ├── sgaps_mae.py            # SGAPS-MAE 메인 모델
-│   ├── sparse_encoder.py       # Sparse Pixel Encoder
-│   ├── information_diffusion.py # Information Diffusion Module
-│   ├── graph_attention.py      # Graph Attention Layers
-│   └── temporal_memory.py      # Temporal Memory Bank
-├── server/                      # 서버 구현
-│   ├── __init__.py
-│   ├── replay_server.py        # 메인 서버
-│   ├── quality_analyzer.py     # 품질 분석기
-│   ├── coordinate_generator.py # 좌표 생성기
-│   └── latency_compensator.py  # 지연 보상
-├── client/                      # 클라이언트 구현
-│   ├── __init__.py
-│   ├── minimal_client.py       # 경량 클라이언트
-│   ├── pixel_extractor.py      # 픽셀 추출기
-│   └── compressor.py           # 압축 모듈
-├── training/                    # 학습 관련
-│   ├── __init__.py
-│   ├── trainer.py              # 학습 메인
-│   ├── curriculum.py           # 커리큘럼 학습
-│   ├── losses.py               # 손실 함수
-│   └── config.yaml             # 학습 설정
-├── utils/                       # 유틸리티
-│   ├── __init__.py
-│   ├── compression.py          # 압축 유틸리티
-│   ├── network.py              # 네트워크 통신
-│   └── metrics.py              # 평가 지표
-└── experiments/                 # 실험 스크립트
-    ├── train.py                # 학습 실행
-    ├── evaluate.py             # 평가
-    └── demo_client_server.py   # 데모 실행
+├── docs/                        # 상세 문서
+│   ├── API_SPECIFICATION.md    # REST/WebSocket API 명세
+│   ├── CLIENT_IMPLEMENTATION.md # Unity 클라이언트 상세 설계
+│   ├── SERVER_IMPLEMENTATION.md # 서버 및 모델 구현 상세
+│   ├── CONFIGURATION.md        # 설정 시스템 및 파라미터
+│   └── ...
+├── sgaps-server/                # Python 서버
+│   ├── main.py                 # FastAPI 엔트리포인트
+│   ├── requirements.txt        # Python 의존성
+│   ├── conf/
+│   │   └── config.yaml         # Hydra 설정 (embed_dim, num_heads 등)
+│   └── sgaps/
+│       ├── api/                # WebSocket/REST 핸들러
+│       ├── core/               # 세션 관리, 샘플러, 복원기
+│       ├── data/               # HDF5 스토리지
+│       ├── models/             # Sparse Pixel Transformer (Phase 2)
+│       └── utils/              # 유틸리티
+└── unity-client/                # Unity UPM 패키지
+    ├── package.json
+    ├── README.md
+    ├── Runtime/
+    │   └── Scripts/
+    │       ├── Core/           # SGAPSManager, NetworkClient, etc.
+    │       └── Data/           # SessionConfig, StateVectorCollector, etc.
+    └── Samples~/               # 예제 씬
 ```
 
 ## 설치 및 사용법
@@ -474,7 +494,7 @@ sequenceDiagram
     C->>S: session_start (checkpoint_key, resolution)
     Note over S: 서버 설정에서 파라미터 로드
     S->>C: session_start_ack
-    Note over C: sample_count, max_state_dim,<br/>target_fps, sentinel_value 수신
+    Note over C: sample_count, max_state_dim,<br/>target_fps 수신
 
     S->>C: uv_coordinates (initial)
     Note over C: PixelSampler, StateVectorCollector 초기화<br/>캡처 시작
@@ -489,12 +509,13 @@ sequenceDiagram
 
 **서버 제어 파라미터**: 다음 값들은 서버 설정(`conf/config.yaml`)에서 관리되며, `session_start_ack`를 통해 클라이언트에 전달됩니다:
 
-| 파라미터         | 설명                    | 기본값 |
-| ---------------- | ----------------------- | ------ |
-| `sample_count`   | 프레임당 샘플링 픽셀 수 | 500    |
-| `max_state_dim`  | 상태 벡터 최대 차원     | 64     |
-| `target_fps`     | 캡처 프레임 레이트      | 10     |
-| `sentinel_value` | 미사용 상태 패딩 값     | -999.0 |
+| 파라미터        | 설명                    | 기본값 |
+| --------------- | ----------------------- | ------ |
+| `sample_count`  | 프레임당 샘플링 픽셀 수 | 500    |
+| `max_state_dim` | 상태 벡터 최대 차원     | 64     |
+| `target_fps`    | 캡처 프레임 레이트      | 10     |
+
+> **Note**: `sentinel_value`는 서버 내부에서 상태 벡터 패딩에 사용되며, 클라이언트에 전달되지 않습니다.
 
 ### 학습 및 평가 (Phase 2 예정)
 
@@ -539,8 +560,8 @@ MIT License
 ## 참고문헌
 
 1. He, K., et al. (2021). Masked autoencoders are scalable vision learners. arXiv:2111.06377
-2. Kipf, T. N., & Welling, M. (2016). Semi-supervised classification with graph convolutional networks
-3. Perona, P., & Malik, J. (1990). Scale-space and edge detection using anisotropic diffusion
+2. Vaswani, A., et al. (2017). Attention is all you need. NeurIPS.
+3. Dosovitskiy, A., et al. (2020). An image is worth 16x16 words: Transformers for image recognition at scale. ICLR.
 
 ## 기여
 

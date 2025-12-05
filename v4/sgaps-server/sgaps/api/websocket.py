@@ -204,6 +204,7 @@ async def handle_session_start(client_id: str, payload: Dict[str, Any]):
     
     Creates a new session and sends initial UV coordinates.
     Server controls sample_count and max_state_dim - client receives these values.
+    Note: sentinel_value is server-internal (used for state vector padding) and NOT sent to client.
     """
     logger.info(f"Session start from {client_id}: {payload}")
     
@@ -212,7 +213,7 @@ async def handle_session_start(client_id: str, payload: Dict[str, Any]):
     sample_count = cfg.sampling.default_sample_count
     max_state_dim = cfg.max_state_dim
     target_fps = cfg.target_fps
-    sentinel_value = cfg.sentinel_value
+    # sentinel_value is server-internal only (for padding state vectors), not sent to client
     
     # Resolution comes from client (screen resolution)
     resolution = tuple(payload.get("resolution", [640, 480]))
@@ -239,6 +240,7 @@ async def handle_session_start(client_id: str, payload: Dict[str, Any]):
     
     # Send acknowledgment with server-controlled parameters
     # Client MUST use these values for sampling and state vector collection
+    # Note: sentinel_value is NOT sent - it's server-internal for padding state vectors
     await manager.send_message(client_id, {
         "type": "session_start_ack",
         "payload": {
@@ -248,7 +250,6 @@ async def handle_session_start(client_id: str, payload: Dict[str, Any]):
             "sample_count": sample_count,
             "max_state_dim": max_state_dim,
             "target_fps": target_fps,
-            "sentinel_value": sentinel_value,
             "resolution": list(resolution)
         }
     })
@@ -264,7 +265,7 @@ async def handle_session_start(client_id: str, payload: Dict[str, Any]):
     
     logger.info(f"Session created for {client_id}: sample_count={sample_count}, "
                 f"max_state_dim={max_state_dim}, target_fps={target_fps}, "
-                f"sent {len(initial_coords)} UV coordinates")
+                f"resolution={resolution}, sent {len(initial_coords)} UV coordinates")
 
 
 async def handle_frame_data(client_id: str, payload: Dict[str, Any]):
