@@ -1,0 +1,22 @@
+# SGAPS-MAE Server Configuration
+
+defaults:
+    - server: development
+    - sampling: uniform
+    - mask_update: fixed
+    - _self_
+
+# Global settings
+max_state_dim: 64
+sentinel_value: -999.0
+target_fps: 10
+
+# Data storage
+storage:
+    base_path: "./data"
+    format: "hdf5"
+
+# Reconstruction settings (Phase 1: OpenCV inpainting)
+reconstruction:
+    method: "opencv_inpaint"
+    inpaint_radius: 3

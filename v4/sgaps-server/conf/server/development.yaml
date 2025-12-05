@@ -1,0 +1,11 @@
+# Development Server Configuration
+
+host: "0.0.0.0"
+port: 8000
+log_level: "debug"
+# Note: For hot reload, run: uvicorn main:app --reload --port 8000
+
+# Session settings
+session:
+    timeout_seconds: 3600
+    max_sessions: 100

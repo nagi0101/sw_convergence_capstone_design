@@ -1,0 +1,29 @@
+{
+    "name": "com.sgaps.runtime",
+    "version": "0.1.0",
+    "displayName": "SGAPS-MAE Client",
+    "description": "Sparse Game-Aware Pixel Sampling client for efficient game replay capture using Masked Autoencoder reconstruction.",
+    "unity": "2021.3",
+    "unityRelease": "0f1",
+    "documentationUrl": "https://github.com/nagi0101/sw_convergence_capstone_design",
+    "keywords": [
+        "sgaps",
+        "mae",
+        "replay",
+        "capture",
+        "streaming"
+    ],
+    "author": {
+        "name": "SGAPS Team"
+    },
+    "dependencies": {
+        "com.unity.nuget.newtonsoft-json": "3.2.1"
+    },
+    "samples": [
+        {
+            "displayName": "Basic Integration",
+            "description": "Example showing how to integrate SGAPS with a game",
+            "path": "Samples~/BasicIntegration"
+        }
+    ]
+}

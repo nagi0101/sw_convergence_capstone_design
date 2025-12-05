@@ -1,0 +1,18 @@
+{
+    "name": "SGAPS.Editor",
+    "rootNamespace": "SGAPS.Editor",
+    "references": [
+        "SGAPS.Runtime"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

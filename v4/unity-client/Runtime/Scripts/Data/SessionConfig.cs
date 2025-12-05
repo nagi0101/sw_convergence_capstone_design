@@ -1,0 +1,96 @@
+using UnityEngine;
+
+namespace SGAPS.Runtime.Data
+{
+    /// <summary>
+    /// Session configuration received from the server.
+    /// Contains server-controlled parameters that the client MUST use.
+    /// </summary>
+    [System.Serializable]
+    public class SessionConfig
+    {
+        /// <summary>
+        /// Checkpoint key for this session.
+        /// </summary>
+        public string CheckpointKey;
+
+        /// <summary>
+        /// Whether a model checkpoint was loaded on the server.
+        /// </summary>
+        public bool CheckpointLoaded;
+
+        /// <summary>
+        /// Model version string from the server.
+        /// </summary>
+        public string ModelVersion;
+
+        /// <summary>
+        /// Number of pixels to sample per frame (server-controlled).
+        /// </summary>
+        public int SampleCount;
+
+        /// <summary>
+        /// Maximum dimension for state vectors (server-controlled).
+        /// </summary>
+        public int MaxStateDim;
+
+        /// <summary>
+        /// Target frames per second for capture (server-controlled).
+        /// </summary>
+        public int TargetFPS;
+
+        /// <summary>
+        /// Sentinel value for unused state dimensions (server-controlled).
+        /// </summary>
+        public float SentinelValue;
+
+        /// <summary>
+        /// Screen resolution to use for capture.
+        /// </summary>
+        public Vector2Int Resolution;
+
+        /// <summary>
+        /// Creates an empty session config.
+        /// </summary>
+        public SessionConfig()
+        {
+            CheckpointKey = "default";
+            CheckpointLoaded = false;
+            ModelVersion = "unknown";
+            SampleCount = 500;
+            MaxStateDim = 64;
+            TargetFPS = 10;
+            SentinelValue = -999.0f;
+            Resolution = new Vector2Int(640, 480);
+        }
+
+        /// <summary>
+        /// Creates a session config with specified values.
+        /// </summary>
+        public SessionConfig(
+            string checkpointKey,
+            bool checkpointLoaded,
+            string modelVersion,
+            int sampleCount,
+            int maxStateDim,
+            int targetFPS,
+            float sentinelValue,
+            Vector2Int resolution)
+        {
+            CheckpointKey = checkpointKey ?? "default";
+            CheckpointLoaded = checkpointLoaded;
+            ModelVersion = modelVersion ?? "unknown";
+            SampleCount = sampleCount;
+            MaxStateDim = maxStateDim;
+            TargetFPS = targetFPS;
+            SentinelValue = sentinelValue;
+            Resolution = resolution;
+        }
+
+        public override string ToString()
+        {
+            return $"SessionConfig(SampleCount={SampleCount}, MaxStateDim={MaxStateDim}, " +
+                   $"TargetFPS={TargetFPS}, Resolution={Resolution.x}x{Resolution.y})";
+        }
+    }
+}

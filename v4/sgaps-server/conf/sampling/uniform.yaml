@@ -1,0 +1,6 @@
+# Uniform Grid Sampling Configuration
+
+pattern: "uniform_grid"
+default_sample_count: 500
+min_sample_count: 100
+max_sample_count: 5000
