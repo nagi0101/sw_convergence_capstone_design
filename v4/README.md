@@ -140,7 +140,7 @@ graph TB
     end
 
     subgraph Embedding["임베딩 (configurable)"]
-        PixelEmbed["Pixel Embedding<br/>Linear(3, embed_dim)"]
+        PixelEmbed["Pixel Embedding<br/>Linear(1, embed_dim)"]
         PosEnc["Continuous Position<br/>Encoding(embed_dim)"]
         StateEnc["State Vector Encoder<br/>MLP → embed_dim"]
         PixelWithPos["Pixel + Position<br/>[N, embed_dim]"]
