@@ -368,60 +368,98 @@ def load_state_vector(frame_group, max_dim=64, sentinel=-999.0):
 
 ### 구현 기능
 
-#### 2.1 Importance Map 계산
+#### 2.1 Importance Map 계산 (Attention Entropy 기반)
 
-##### 2.1.1 재구성 오류 기반 중요도
+##### 2.1.1 핵심 아이디어
+
+무거운 연산이 필요한 Dropout 기반의 불확실성 추정 대신, 모델이 이미 계산하고 있는 **Attention Map의 엔트로피(Entropy)**를 활용하여 추가 연산 비용을 거의 들이지 않고 중요도를 판단합니다.
+
+-   **Decoder Cross-Attention**은 '복원해야 할 전체 픽셀(Query)'이 '주어진 희소 픽셀(Key)' 중 어디를 참조할지 결정합니다.
+-   **낮은 엔트로피 (Low Entropy):** 특정 희소 픽셀에 강하게 집중함 → "참조할 확실한 단서가 있다" → **불확실성 낮음 (중요도 낮음)**
+-   **높은 엔트로피 (High Entropy):** 여러 희소 픽셀을 두루뭉술하게 참조함 → "어디를 봐야 할지 모른다" → **불확실성 높음 (중요도 높음, 추가 샘플링 필요)**
+
+##### 2.1.2 Attention Entropy 기반 중요도 계산
 
 ```python
-class ImportanceCalculator:
-    def compute(self, reconstructed_frame, sparse_pixels):
-        # 1. Ground Truth 근사
-        # (완전한 GT는 없으므로, 이전 프레임 + 샘플 픽셀로 추정)
-        gt_approx = self._approximate_ground_truth(
-            reconstructed_frame, sparse_pixels
+class AttentionEntropyImportanceCalculator:
+    """Decoder Cross-Attention 엔트로피 기반 Importance Map 계산"""
+
+    def __init__(self, config):
+        self.config = config
+        self.epsilon = 1e-9  # log(0) 방지
+
+    def compute(self, attention_weights, resolution):
+        """
+        Args:
+            attention_weights: Decoder Cross-Attention 가중치
+                Shape: [B, num_heads, H*W, N]
+                - H*W: 전체 프레임 픽셀 수 (Query)
+                - N: 샘플링된 희소 픽셀 수 (Key)
+            resolution: (H, W) 출력 해상도
+
+        Returns:
+            importance_map: np.ndarray [H, W] (0~1 normalized)
+        """
+        H, W = resolution
+        B, num_heads, L_query, L_key = attention_weights.shape
+
+        # 1. Head 평균 (Head Averaging)
+        # [B, num_heads, H*W, N] → [B, H*W, N]
+        attn_avg = attention_weights.mean(dim=1)
+
+        # 2. 픽셀별 엔트로피 계산 (Pixel-wise Entropy)
+        # 각 픽셀 위치 i에 대해, 샘플링된 픽셀들에 대한 확률 분포의 엔트로피
+        # Importance_i = -Σ_j A_avg(i,j) * log(A_avg(i,j) + ε)
+        entropy = -torch.sum(
+            attn_avg * torch.log(attn_avg + self.epsilon),
+            dim=-1  # Key 차원에 대해 합산
+        )  # [B, H*W]
+
+        # 3. 배치 평균 및 이미지 형태로 변환
+        entropy = entropy.mean(dim=0)  # [H*W]
+        importance_map = entropy.view(H, W).cpu().numpy()  # [H, W]
+
+        # 4. 정규화 [0, 1]
+        importance_map = (importance_map - importance_map.min()) / (
+            importance_map.max() - importance_map.min() + self.epsilon
         )
-
-        # 2. 픽셀별 오류 계산
-        error_map = np.abs(reconstructed_frame - gt_approx)
-
-        # 3. 엣지 검출 (고주파 영역 강조)
-        edges = cv2.Sobel(reconstructed_frame, cv2.CV_64F, 1, 1)
-
-        # 4. 가중 합산
-        importance_map = 0.6 * error_map + 0.4 * np.abs(edges)
-
-        # 5. 정규화
-        importance_map /= importance_map.max()
 
         return importance_map
 
 # 성공 기준
-- Importance map이 시각적으로 합리적 (엣지/변화 영역이 밝음)
-- 계산 시간 < 20ms
+- 모델 forward pass에서 attention weights 추출 가능
+- 추가 연산 오버헤드 < 5ms (attention 이미 계산됨)
+- 높은 엔트로피 영역이 시각적으로 불확실한 영역과 일치
+- Importance map이 다음 프레임 샘플링 품질 향상에 기여
 ```
 
-##### 2.1.2 시간적 변화 추적
+##### 2.1.3 모델에서 Attention Weights 추출
 
 ```python
-class TemporalTracker:
-    def __init__(self):
-        self.previous_frame = None
+class SparsePixelTransformer(nn.Module):
+    def forward(self, sparse_pixels, state_vector, state_mask, resolution,
+                return_attention=False):
+        # ... (기존 forward 로직)
 
-    def update(self, current_frame):
-        if self.previous_frame is None:
-            temporal_importance = np.zeros_like(current_frame)
-        else:
-            # 프레임 간 차이 (모션 영역)
-            temporal_importance = np.abs(
-                current_frame - self.previous_frame
-            )
+        # Decoder Cross-Attention 수행 시 attention weights 저장
+        decoded, cross_attn_weights = self.decoder(
+            query_embeds,
+            encoded,
+            need_weights=True,  # attention weights 반환 활성화
+            average_attn_weights=False  # head별 weights 유지
+        )
 
-        self.previous_frame = current_frame.copy()
-        return temporal_importance
+        # ... (기존 로직 계속)
 
-# 성공 기준
-- 움직이는 객체 영역에서 높은 중요도
-- 정적 배경에서 낮은 중요도
+        if return_attention:
+            return output, cross_attn_weights  # [B, num_heads, H*W, N]
+        return output
+
+# 사용 예시
+model = SparsePixelTransformer(config)
+pred, attn_weights = model(sparse_pixels, state_vector, state_mask,
+                            resolution, return_attention=True)
+importance_map = importance_calculator.compute(attn_weights, resolution)
 ```
 
 #### 2.2 적응적 UV 좌표 생성
@@ -803,62 +841,73 @@ class StateVectorEncoder(nn.Module):
 - 상태 벡터 활용으로 재구성 품질 향상 (A/B 테스트)
 ```
 
-##### 3.2.2 손실 함수
+##### 3.2.2 손실 함수 (Sampled Pixel L2 Loss)
+
+초기 단계의 빠른 수렴과 개념 검증(PoC)을 위해 복잡한 가중치나 추가적인 항(Perceptual, Temporal 등)을 모두 배제하고, 가장 직관적인 **샘플링된 픽셀에 대한 MSE(Mean Squared Error)**만을 사용합니다.
+
+**수식:**
+
+$$L_{total} = \frac{1}{N_{sampled}} \sum_{i \in P_{sampled}} || I_{pred}(x_i) - I_{gt}(x_i) ||_2^2$$
+
+-   $P_{sampled}$: 현재 프레임에서 샘플링된 픽셀들의 좌표 집합
+-   $N_{sampled}$: 샘플링된 픽셀의 개수 (예: 500)
+-   $I(x_i)$: 해당 좌표의 픽셀 값 (Grayscale 0~1)
 
 ```python
-class SGAPSLoss(nn.Module):
-    def __init__(self, config):
+class SampledPixelL2Loss(nn.Module):
+    """샘플링된 픽셀 위치에서만 L2 손실 계산"""
+
+    def __init__(self):
         super().__init__()
-        self.mse_weight = config.loss.mse_weight
-        self.perceptual_weight = config.loss.perceptual_weight
-        self.sparsity_weight = config.loss.sparsity_weight
 
-        # VGG for perceptual loss (optional)
-        if self.perceptual_weight > 0:
-            self.vgg = torchvision.models.vgg16(pretrained=True).features[:16]
-            self.vgg.eval()
-            for param in self.vgg.parameters():
-                param.requires_grad = False
+    def forward(self, pred, gt, sampled_coords):
+        """
+        Args:
+            pred: [B, 1, H, W] 예측 프레임
+            gt: [B, 1, H, W] Ground Truth 프레임
+            sampled_coords: [B, N, 2] 샘플링된 UV 좌표 (u, v in [0, 1])
 
-    def forward(self, pred, gt, num_pixels):
-        # 1. 재구성 손실 (MSE)
-        mse_loss = F.mse_loss(pred, gt)
+        Returns:
+            dict with 'total' loss
+        """
+        B, _, H, W = pred.shape
+        N = sampled_coords.shape[1]
 
-        # 2. 지각 손실 (선택 사항)
-        if self.perceptual_weight > 0:
-            # Grayscale → RGB (VGG 입력용)
-            pred_rgb = pred.repeat(1, 3, 1, 1)
-            gt_rgb = gt.repeat(1, 3, 1, 1)
+        # 1. UV 좌표를 픽셀 인덱스로 변환
+        # u → x (width), v → y (height)
+        u = sampled_coords[:, :, 0]  # [B, N]
+        v = sampled_coords[:, :, 1]  # [B, N]
 
-            pred_features = self.vgg(pred_rgb)
-            gt_features = self.vgg(gt_rgb)
+        x = (u * (W - 1)).long().clamp(0, W - 1)  # [B, N]
+        y = (v * (H - 1)).long().clamp(0, H - 1)  # [B, N]
 
-            perceptual_loss = F.mse_loss(pred_features, gt_features)
-        else:
-            perceptual_loss = 0.0
+        # 2. 샘플링된 위치에서 픽셀 값 추출 (gather 사용)
+        # Flatten spatial dimensions for gather
+        pred_flat = pred.view(B, H * W)  # [B, H*W]
+        gt_flat = gt.view(B, H * W)      # [B, H*W]
 
-        # 3. 희소성 정규화 (픽셀 개수가 너무 많아지지 않도록)
-        # 목표: 평균 500 pixels
-        sparsity_loss = F.relu(num_pixels.float().mean() - 500) / 500
+        # 2D 좌표를 1D 인덱스로 변환: idx = y * W + x
+        indices = y * W + x  # [B, N]
 
-        # 총 손실
-        total_loss = (
-            self.mse_weight * mse_loss +
-            self.perceptual_weight * perceptual_loss +
-            self.sparsity_weight * sparsity_loss
-        )
+        pred_sampled = torch.gather(pred_flat, dim=1, index=indices)  # [B, N]
+        gt_sampled = torch.gather(gt_flat, dim=1, index=indices)      # [B, N]
+
+        # 3. L2 Loss 계산 (샘플링된 픽셀에 대해서만)
+        l2_loss = F.mse_loss(pred_sampled, gt_sampled)
 
         return {
-            "total": total_loss,
-            "mse": mse_loss,
-            "perceptual": perceptual_loss,
-            "sparsity": sparsity_loss
+            "total": l2_loss,
+            "l2_sampled": l2_loss.item()
         }
 
 # 성공 기준
-- 학습 초기: MSE 손실 감소 확인
-- Perceptual loss 추가 시 시각적 품질 향상 확인
+- 학습 초기: L2 손실이 빠르게 감소
+- 샘플링된 위치에서 예측값과 GT가 일치
+- 추론 시 전체 프레임 품질 향상 (일반화 확인)
+- 학습 속도: 복잡한 손실 함수 대비 ~2배 빠른 수렴
 ```
+
+> **구현 노트:** 마스킹을 적용하여 샘플링되지 않은 영역의 오차는 0으로 처리하거나, `gather` 함수로 해당 위치의 값만 추출하여 계산합니다. 위 구현은 `gather` 방식을 사용합니다.
 
 #### 3.3 학습 파이프라인
 

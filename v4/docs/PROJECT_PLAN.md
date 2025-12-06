@@ -281,53 +281,70 @@ Unity 버전: 2021.3 LTS 이상
 2. **연속 좌표**: 정수 그리드에 국한되지 않음
 3. **적응적 샘플링 친화적**: 중요 영역에 픽셀 집중 가능
 
-### 손실 함수
+### 손실 함수 (Sampled Pixel L2 Loss)
+
+초기 단계의 빠른 수렴과 개념 검증(PoC)을 위해 **샘플링된 픽셀에 대한 MSE(Mean Squared Error)**만을 사용합니다.
 
 ```python
-# 재구성 손실
-reconstruction_loss = MSE(predicted_frame, ground_truth_frame)
+# 샘플링된 위치에서만 손실 계산
+L_total = (1 / N_sampled) * sum(||I_pred(x_i) - I_gt(x_i)||^2 for x_i in P_sampled)
 
-# 지각 손실 (옵션)
-perceptual_loss = MSE(VGG_features(pred), VGG_features(gt))
-
-# 희소성 정규화 (픽셀 개수가 너무 많아지는 것 방지)
-sparsity_loss = lambda * num_sampled_pixels
-
-# 총 손실
-total_loss = reconstruction_loss + 0.1 * perceptual_loss + 0.001 * sparsity_loss
+# P_sampled: 샘플링된 픽셀 좌표 집합
+# N_sampled: 샘플링된 픽셀 수 (예: 500)
+# I(x_i): 해당 좌표의 픽셀 값 (Grayscale 0~1)
 ```
+
+**장점:**
+
+-   빠른 수렴: 복잡한 Perceptual/Temporal Loss 없이 직관적
+-   희소 픽셀 정확도 보장: 모델이 최소한 주어진 힌트는 정확히 복원하도록 강제
+-   확장 가능: 향후 Perceptual Loss 등 추가 가능
 
 ---
 
 ## 적응적 샘플링 알고리즘
 
-### Importance Map 계산
+### Importance Map 계산 (Attention Entropy)
 
-서버가 재구성한 프레임과 실제 프레임(클라이언트가 전송한 픽셀로부터 추론)을 비교:
+모델이 이미 계산하는 **Decoder Cross-Attention Map의 엔트로피**를 활용하여 추가 연산 비용 없이 중요도를 판단합니다.
+
+**핵심 아이디어:**
+
+-   Decoder Cross-Attention은 '복원해야 할 전체 픽셀(Query)'이 '주어진 희소 픽셀(Key)' 중 어디를 참조할지 결정
+-   **낮은 엔트로피**: 특정 희소 픽셀에 강하게 집중 → "확실한 단서가 있다" → 중요도 낮음
+-   **높은 엔트로피**: 여러 희소 픽셀을 두루뭉술하게 참조 → "어디를 봐야 할지 모른다" → 중요도 높음 (추가 샘플링 필요)
 
 ```python
-def compute_importance_map(reconstructed_frame, sparse_pixels, ground_truth_patches):
+def compute_importance_from_attention(attention_weights, resolution):
     """
-    재구성 오류가 큰 영역일수록 높은 중요도 할당
+    Decoder Cross-Attention 엔트로피 기반 중요도 계산
+
+    Args:
+        attention_weights: [B, num_heads, H*W, N] - Decoder 마지막 레이어에서 추출
+        resolution: (H, W)
     """
-    # 1. 재구성 오류 맵
-    error_map = (reconstructed_frame - ground_truth) ** 2
+    H, W = resolution
+    epsilon = 1e-9
 
-    # 2. 엣지 검출 (높은 주파수 영역 우선)
-    edges = sobel_filter(reconstructed_frame)
+    # 1. Head 평균: [B, num_heads, H*W, N] → [B, H*W, N]
+    attn_avg = attention_weights.mean(dim=1)
 
-    # 3. 시간적 변화 (모션이 큰 영역 우선)
-    temporal_diff = abs(current_frame - previous_frame)
+    # 2. 픽셀별 엔트로피 계산
+    # Importance_i = -∑_j A(i,j) * log(A(i,j) + ε)
+    entropy = -torch.sum(attn_avg * torch.log(attn_avg + epsilon), dim=-1)  # [B, H*W]
 
-    # 4. 가중 합산
-    importance = (
-        0.5 * error_map +
-        0.3 * edges +
-        0.2 * temporal_diff
-    )
+    # 3. 이미지 형태로 변환 및 정규화
+    importance_map = entropy.mean(dim=0).view(H, W)  # [H, W]
+    importance_map = (importance_map - importance_map.min()) / (importance_map.max() - importance_map.min() + epsilon)
 
-    return importance
+    return importance_map
 ```
+
+**장점:**
+
+-   추가 연산 비용 거의 없음 (attention 이미 계산됨)
+-   Monte Carlo Dropout 대비 빠르고 결정적(deterministic)
+-   모델의 실제 불확실성을 직접 반영
 
 ### UV 좌표 생성 전략
 

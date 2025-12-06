@@ -590,7 +590,13 @@ class ContinuousPositionalEncoding(nn.Module):
         return embeddings + pos_encoding
 ```
 
-### 2.3 손실 함수
+### 2.3 손실 함수 (Sampled Pixel L2 Loss)
+
+초기 단계의 빠른 수렴과 개념 검증(PoC)을 위해 **샘플링된 픽셀에 대한 MSE(Mean Squared Error)**만을 사용합니다.
+
+**수식:**
+
+$$L_{total} = \frac{1}{N_{sampled}} \sum_{i \in P_{sampled}} || I_{pred}(x_i) - I_{gt}(x_i) ||_2^2$$
 
 ```python
 # sgaps/models/losses.py
@@ -598,69 +604,55 @@ class ContinuousPositionalEncoding(nn.Module):
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torchvision
 
-class SGAPSLoss(nn.Module):
-    """SGAPS 학습을 위한 복합 손실 함수"""
+class SampledPixelL2Loss(nn.Module):
+    """샘플링된 픽셀 위치에서만 L2 손실 계산
 
-    def __init__(self, config):
+    모델이 최소한 주어진 힌트(샘플)는 정확히 복원하도록 강제합니다.
+    """
+
+    def __init__(self):
         super().__init__()
-        self.mse_weight = config.loss.mse_weight
-        self.perceptual_weight = config.loss.perceptual_weight
-        self.sparsity_weight = config.loss.sparsity_weight
 
-        # VGG for perceptual loss
-        if self.perceptual_weight > 0:
-            vgg = torchvision.models.vgg16(pretrained=True)
-            self.vgg_features = vgg.features[:16].eval()
-
-            for param in self.vgg_features.parameters():
-                param.requires_grad = False
-
-    def forward(self, pred, target, num_pixels):
+    def forward(self, pred, target, sampled_coords):
         """
         Args:
             pred: [B, 1, H, W] 예측 프레임
             target: [B, 1, H, W] Ground Truth
-            num_pixels: [B] 각 샘플의 픽셀 개수
+            sampled_coords: [B, N, 2] 샘플링된 UV 좌표 (u, v in [0, 1])
 
         Returns:
             dict of losses
         """
-        # 1. MSE 재구성 손실
-        mse_loss = F.mse_loss(pred, target)
+        B, _, H, W = pred.shape
+        N = sampled_coords.shape[1]
 
-        # 2. Perceptual 손실 (VGG features)
-        perceptual_loss = 0.0
-        if self.perceptual_weight > 0:
-            # Grayscale → RGB (VGG 입력용)
-            pred_rgb = pred.repeat(1, 3, 1, 1)
-            target_rgb = target.repeat(1, 3, 1, 1)
+        # 1. UV 좌표를 픽셀 인덱스로 변환
+        u = sampled_coords[:, :, 0]  # [B, N]
+        v = sampled_coords[:, :, 1]  # [B, N]
 
-            with torch.no_grad():
-                target_features = self.vgg_features(target_rgb)
+        x = (u * (W - 1)).long().clamp(0, W - 1)  # [B, N]
+        y = (v * (H - 1)).long().clamp(0, H - 1)  # [B, N]
 
-            pred_features = self.vgg_features(pred_rgb)
-            perceptual_loss = F.mse_loss(pred_features, target_features)
+        # 2. 샘플링된 위치에서 픽셀 값 추출
+        pred_flat = pred.view(B, H * W)     # [B, H*W]
+        target_flat = target.view(B, H * W) # [B, H*W]
 
-        # 3. Sparsity 정규화 (픽셀 개수 제한)
-        target_num_pixels = 500.0
-        sparsity_loss = F.relu(num_pixels.float().mean() - target_num_pixels) / target_num_pixels
+        indices = y * W + x  # [B, N]
 
-        # 총 손실
-        total_loss = (
-            self.mse_weight * mse_loss +
-            self.perceptual_weight * perceptual_loss +
-            self.sparsity_weight * sparsity_loss
-        )
+        pred_sampled = torch.gather(pred_flat, dim=1, index=indices)     # [B, N]
+        target_sampled = torch.gather(target_flat, dim=1, index=indices) # [B, N]
+
+        # 3. L2 Loss 계산 (샘플링된 픽셀에서만)
+        l2_loss = F.mse_loss(pred_sampled, target_sampled)
 
         return {
-            "total": total_loss,
-            "mse": mse_loss.item(),
-            "perceptual": perceptual_loss.item() if isinstance(perceptual_loss, torch.Tensor) else 0.0,
-            "sparsity": sparsity_loss.item()
+            "total": l2_loss,
+            "l2_sampled": l2_loss.item()
         }
 ```
+
+> **Note:** 이 단순한 손실 함수는 MVP 단계에서 빠른 학습 수렴을 위해 설계되었습니다. 향후 Perceptual Loss, SSIM Loss 등을 추가하여 시각적 품질을 개선할 수 있습니다.
 
 ---
 
@@ -791,75 +783,103 @@ class CheckpointManager:
         print(f"[SGAPS] Registered new checkpoint: {checkpoint_key}")
 ```
 
-### 3.2 Importance Calculator
+### 3.2 Importance Calculator (Attention Entropy)
+
+모델이 이미 계산하는 **Decoder Cross-Attention Map의 엔트로피**를 활용하여 추가 연산 비용 없이 중요도를 판단합니다.
+
+**핵심 아이디어:**
+
+-   **낮은 엔트로피**: 특정 희소 픽셀에 강하게 집중 → 불확실성 낮음 (중요도 낮음)
+-   **높은 엔트로피**: 여러 희소 픽셀을 두루뭉술하게 참조 → 불확실성 높음 (중요도 높음, 추가 샘플링 필요)
 
 ```python
 # sgaps/core/importance.py
 
+import torch
 import numpy as np
-import cv2
 
-class ImportanceCalculator:
-    """재구성 품질 기반으로 Importance Map 계산"""
+class AttentionEntropyImportanceCalculator:
+    """Decoder Cross-Attention 엔트로피 기반 Importance Map 계산"""
 
     def __init__(self, config):
         self.config = config
-        self.previous_frame = None
+        self.epsilon = 1e-9  # log(0) 방지
 
-    def compute(self, reconstructed_frame, sparse_pixels):
+    def compute(self, attention_weights, resolution):
         """
         Args:
-            reconstructed_frame: np.ndarray [H, W]
-            sparse_pixels: np.ndarray [N, 3] (u, v, value)
+            attention_weights: Decoder Cross-Attention 가중치
+                Shape: [B, num_heads, H*W, N]
+                - H*W: 전체 프레임 픽셀 수 (Query)
+                - N: 샘플링된 희소 픽셀 수 (Key)
+            resolution: (H, W) 출력 해상도
 
         Returns:
             importance_map: np.ndarray [H, W] (0~1 normalized)
         """
-        H, W = reconstructed_frame.shape
+        H, W = resolution
+        B, num_heads, L_query, L_key = attention_weights.shape
 
-        # 1. Ground Truth 근사 (샘플 픽셀로부터)
-        gt_approx = self._approximate_gt(reconstructed_frame, sparse_pixels, (H, W))
+        # 1. Head 평균 (Head Averaging)
+        # 여러 Head의 Attention을 평균내어 하나의 맵으로 만듬
+        attn_avg = attention_weights.mean(dim=1)  # [B, H*W, N]
 
-        # 2. 재구성 오류 맵
-        error_map = np.abs(reconstructed_frame - gt_approx).astype(np.float32)
+        # 2. 픽셀별 엔트로피 계산 (Pixel-wise Entropy)
+        # 각 픽셀 위치 i에 대해, 샘플링된 픽셀들(j=1...N)에 대한
+        # 확률 분포의 엔트로피를 계산
+        # Importance_i = -∑_j A_avg(i,j) * log(A_avg(i,j) + ε)
+        entropy = -torch.sum(
+            attn_avg * torch.log(attn_avg + self.epsilon),
+            dim=-1  # Key 차원에 대해 합산
+        )  # [B, H*W]
 
-        # 3. 엣지 검출 (Sobel)
-        edges = cv2.Sobel(reconstructed_frame, cv2.CV_64F, 1, 1, ksize=3)
-        edges = np.abs(edges).astype(np.float32)
+        # 3. 배치 평균 및 이미지 형태로 변환
+        entropy = entropy.mean(dim=0)  # [H*W]
+        importance_map = entropy.view(H, W).cpu().numpy()  # [H, W]
 
-        # 4. 시간적 변화 (모션)
-        if self.previous_frame is not None:
-            temporal_diff = np.abs(reconstructed_frame - self.previous_frame).astype(np.float32)
-        else:
-            temporal_diff = np.zeros_like(reconstructed_frame, dtype=np.float32)
-
-        self.previous_frame = reconstructed_frame.copy()
-
-        # 5. 가중 합산
-        importance_map = (
-            0.5 * error_map +
-            0.3 * edges +
-            0.2 * temporal_diff
+        # 4. 정규화 [0, 1]
+        importance_map = (importance_map - importance_map.min()) / (
+            importance_map.max() - importance_map.min() + self.epsilon
         )
-
-        # 6. 정규화 [0, 1]
-        importance_map = (importance_map - importance_map.min()) / (importance_map.max() - importance_map.min() + 1e-8)
 
         return importance_map
 
-    def _approximate_gt(self, reconstructed_frame, sparse_pixels, resolution):
-        """샘플 픽셀 위치는 GT 값으로 채우고 나머지는 재구성 값 사용"""
-        H, W = resolution
-        gt_approx = reconstructed_frame.copy()
+    def compute_from_model(self, model, sparse_pixels, state_vector,
+                           state_mask, resolution):
+        """Forward pass와 함께 importance map 계산"""
+        with torch.no_grad():
+            # Attention weights를 반환하는 forward
+            pred, attn_weights = model(
+                sparse_pixels, state_vector, state_mask, resolution,
+                return_attention=True
+            )
+        return self.compute(attn_weights, resolution), pred
+```
 
-        for pixel in sparse_pixels:
-            u, v, value = pixel
-            x = int(u * W)
-            y = int(v * H)
-            if 0 <= x < W and 0 <= y < H:
-                gt_approx[y, x] = value
+**모델 수정 (선택적):**
 
-        return gt_approx
+```python
+# SparsePixelTransformer에 attention weights 반환 기능 추가
+
+class SparsePixelTransformer(nn.Module):
+    def forward(self, sparse_pixels, state_vector, state_mask, resolution,
+                return_attention=False):
+        # ... (기존 로직)
+
+        # Decoder 레이어에서 attention weights 추출
+        # need_weights=True로 설정하여 attention weights 반환
+        for layer in self.decoder.layers:
+            decoded, attn_weights = layer(
+                decoded, encoded,
+                need_weights=True,
+                average_attn_weights=False  # head별 weights 유지
+            )
+
+        # ... (기존 로직)
+
+        if return_attention:
+            return output, attn_weights  # 마지막 레이어의 attention
+        return output
 ```
 
 ### 3.3 Adaptive UV Sampler

@@ -28,6 +28,21 @@ model:
     num_encoder_layers: 6 # Sparse Transformer Encoder layers
     num_decoder_layers: 4 # Cross-Attention Decoder layers
     feedforward_dim: 1024 # FFN 중간 차원
+    # NOTE: dropout은 정규화(regularization) 용도로만 사용됨
+    # 불확실성 추정은 Attention Entropy 기반으로 수행 (Monte Carlo Dropout 미사용)
     dropout: 0.1
     # Phase 1: Grayscale (1 channel), Phase 2+: RGB (3 channels)
     color_channels: 1
+
+# Loss function settings (Phase 3)
+loss:
+    # MVP: Sampled Pixel L2 Loss only
+    # 샘플링된 픽셀 위치에서만 L2 손실 계산
+    type: "sampled_pixel_l2"
+
+# Importance calculation settings (Phase 2)
+importance:
+    # Attention Entropy 기반 중요도 계산
+    # Decoder Cross-Attention의 엔트로피를 활용
+    method: "attention_entropy"
+    epsilon: 1.0e-9 # log(0) 방지용

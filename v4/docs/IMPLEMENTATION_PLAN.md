@@ -77,9 +77,28 @@ v4/
 
 ## Phase 3: Adaptive Sampling (Future)
 
--   Gradient-based sampling optimization
--   Dynamic UV coordinate generation
+-   **Attention Entropy-based importance calculation** (replaces Dropout-based uncertainty)
+-   Dynamic UV coordinate generation based on importance maps
 -   Quality feedback loop
+
+### Key Design Decisions
+
+#### Loss Function: Sampled Pixel L2 Loss
+
+For fast convergence and PoC validation, we use simple MSE only on sampled pixel positions:
+
+$$L_{total} = \frac{1}{N_{sampled}} \sum_{i \in P_{sampled}} || I_{pred}(x_i) - I_{gt}(x_i) ||_2^2$$
+
+This ensures the model accurately reconstructs at least the sampled positions, enabling generalization to unsampled regions.
+
+#### Importance Calculation: Attention Entropy
+
+Instead of computationally expensive Monte Carlo Dropout, we leverage the model's existing **Decoder Cross-Attention** weights:
+
+-   **Low Entropy**: Model confidently references specific sparse pixels → Low importance
+-   **High Entropy**: Model uncertain about which sparse pixels to reference → High importance (needs more samples)
+
+This provides importance maps with near-zero additional computation cost.
 
 ## Running the System
 
