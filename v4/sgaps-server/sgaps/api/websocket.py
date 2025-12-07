@@ -237,6 +237,10 @@ async def handle_session_start(client_id: str, payload: Dict[str, Any]):
     
     # Store sampler in session
     session.sampler = sampler
+
+    # Create and test the reconstructor
+    reconstructor = OpenCVReconstructor()
+    checkpoint_loaded = reconstructor.load_checkpoint(session.checkpoint_key)
     
     # Send acknowledgment with server-controlled parameters
     # Client MUST use these values for sampling and state vector collection
@@ -245,7 +249,7 @@ async def handle_session_start(client_id: str, payload: Dict[str, Any]):
         "type": "session_start_ack",
         "payload": {
             "checkpoint_key": session.checkpoint_key,
-            "checkpoint_loaded": False,  # Phase 1: No model loading
+            "checkpoint_loaded": checkpoint_loaded,
             "model_version": "opencv_inpaint_v1",
             "sample_count": sample_count,
             "max_state_dim": max_state_dim,

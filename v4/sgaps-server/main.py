@@ -90,12 +90,8 @@ def create_app(cfg: DictConfig = None) -> FastAPI:
     # Set server config for WebSocket handlers
     set_server_config(cfg)
     
-    # Configure logging
-    log_level = cfg.server.get("log_level", "info").upper()
-    logging.basicConfig(
-        level=getattr(logging, log_level),
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    )
+    # Logging is configured by uvicorn, which is passed the log_level from config.
+    # BasicConfig can interfere with uvicorn's more sophisticated logging setup.
     
     application = FastAPI(
         title="SGAPS-MAE Server",

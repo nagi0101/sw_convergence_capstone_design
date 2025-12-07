@@ -499,6 +499,8 @@ augmentation:
 
 ```yaml
 # conf/logging/wandb.yaml
+# Weights & Biases를 사용한 학습 과정 및 실시간 추론 결과 모니터링
+# 이 설정은 별도의 웹 대시보드 개발을 대체합니다.
 
 type: wandb
 
@@ -511,22 +513,30 @@ wandb:
     - ${sampling.strategy}
 
   # 로깅 설정
-  log_interval: 10         # 10 iteration마다
-  log_gradients: true
+  log_interval: 10         # 학습 시: 10 iteration마다
+  log_gradients: true      # 학습 시: 그래디언트 로깅
   log_model: true          # 모델 아티팩트 저장
 
   # 체크포인트 업로드
   save_checkpoints: true
 
-# 추가 메트릭
+# WandB 대시보드에 기록될 메트릭 예시
 custom_metrics:
-  - train/loss
-  - train/mse
-  - train/perceptual
-  - val/psnr
-  - val/ssim
-  - system/gpu_utilization
-  - system/gpu_memory_mb
+  # 실시간 추론 모니터링용
+  - "Live/Reconstruction"      # 복원된 프레임 이미지
+  - "Live/Importance Map"    # 중요도 맵 이미지
+  - "Live/Sampling Coords"   # 샘플링 좌표 시각화 이미지
+  - "Metrics/PSNR"
+  - "Metrics/SSIM"
+  # 학습 과정 모니터링용
+  - "train/loss"
+  - "train/mse"
+  - "train/perceptual"
+  - "val/psnr"
+  - "val/ssim"
+  # 시스템 리소스 모니터링용
+  - "system/gpu_utilization"
+  - "system/gpu_memory_mb"
 ```
 
 ### 8.2 console.yaml

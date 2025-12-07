@@ -81,6 +81,15 @@ namespace SGAPS.Runtime.Core
         /// <summary>Returns the current screen resolution.</summary>
         public Vector2Int ScreenResolution => new Vector2Int(Screen.width, Screen.height);
 
+        #region Debug Properties
+        public bool IsCapturing => isCapturing;
+        public int TargetFPS => targetFPS;
+        public int SampleCount => sampleCount;
+        public float LastCaptureTimeMs => lastCaptureTime;
+        public float AverageCaptureTimeMs => averageCaptureTime;
+        public string LastError => lastError;
+        #endregion
+
         #endregion
 
         #region Unity Lifecycle
@@ -407,22 +416,28 @@ namespace SGAPS.Runtime.Core
 
         #region Debug UI
 
+        private Rect windowRect = new Rect(10, 10, 320, 100); // Height is auto-adjusted by GUILayout
+
         private void OnGUI()
         {
             if (!showDebugPanel) return;
 
-            GUI.Box(new Rect(10, 10, 320, 200), "SGAPS Debug Panel");
+            // Use GUILayout.Window for an auto-sizing, draggable window.
+            windowRect = GUILayout.Window(0, windowRect, DrawDebugWindow, "SGAPS Debug Panel");
+        }
 
-            GUILayout.BeginArea(new Rect(20, 40, 300, 170));
+        private void DrawDebugWindow(int windowID)
+        {
+            GUIStyle richTextStyle = CreateRichTextStyle();
 
             string connectionStatus = IsConnected ? "<color=green>Connected</color>" : "<color=red>Disconnected</color>";
-            GUILayout.Label($"Status: {connectionStatus}", CreateRichTextStyle());
+            GUILayout.Label($"Status: {connectionStatus}", richTextStyle);
 
-            GUILayout.Label($"Endpoint: {serverEndpoint}");
+            GUILayout.Label($"Endpoint: {TruncateString(serverEndpoint, 40)}");
             GUILayout.Label($"Frames Sent: {frameCounter}");
 
             string captureStatus = isCapturing ? "<color=green>Active</color>" : "<color=yellow>Inactive</color>";
-            GUILayout.Label($"Capturing: {captureStatus}", CreateRichTextStyle());
+            GUILayout.Label($"Capturing: {captureStatus}", richTextStyle);
 
             GUILayout.Label($"Target FPS: {targetFPS}");
             GUILayout.Label($"Sampled Pixels: {currentUVCoordinates?.Count ?? 0}");
@@ -431,10 +446,13 @@ namespace SGAPS.Runtime.Core
 
             if (!string.IsNullOrEmpty(lastError))
             {
-                GUILayout.Label($"<color=red>Error: {TruncateString(lastError, 40)}</color>", CreateRichTextStyle());
+                GUIStyle errorStyle = CreateRichTextStyle();
+                errorStyle.wordWrap = true;
+                GUILayout.Label($"<color=red>Error: {lastError}</color>", errorStyle);
             }
 
-            GUILayout.EndArea();
+            // Allow the window to be dragged by its title bar.
+            GUI.DragWindow(new Rect(0, 0, 10000, 20));
         }
 
         private GUIStyle CreateRichTextStyle()

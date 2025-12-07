@@ -54,6 +54,26 @@ class OpenCVReconstructor:
         
         logger.info(f"OpenCVReconstructor initialized: radius={inpaint_radius}, method={method}")
     
+    def load_checkpoint(self, checkpoint_key: str) -> bool:
+        """
+        Stub for loading a trained model checkpoint.
+        
+        In Phase 1, this always returns False as no model is used.
+        In future phases, this will load the weights for the MAE model.
+        
+        Args:
+            checkpoint_key: The identifier for the checkpoint to load.
+            
+        Returns:
+            False, indicating the checkpoint was not loaded.
+        """
+        logger.warning(
+            f"Attempted to load checkpoint '{checkpoint_key}', but model loading is a "
+            "Phase 2+ feature and is not yet implemented. "
+            "Falling back to baseline reconstructor."
+        )
+        return False
+    
     def reconstruct(
         self,
         pixels: List[Dict],

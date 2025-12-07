@@ -423,26 +423,9 @@ ws://server:8080/ws/stream?session_id=550e8400-e29b-41d4-a716-446655440000
 
 ---
 
-#### 2.4.2 reconstruction_feedback
+#### 2.4.2 ~~reconstruction_feedback~~ (사용 중단)
 
-재구성 결과 피드백 (디버깅/모니터링용).
-
-```json
-{
-    "type": "reconstruction_feedback",
-    "payload": {
-        "frame_id": 12345,
-        "psnr": 26.8,
-        "ssim": 0.87,
-        "reconstruction_time_ms": 28,
-        "importance_map_summary": {
-            "max": 0.95,
-            "mean": 0.42,
-            "std": 0.18
-        }
-    }
-}
-```
+> **Note**: 재구성 결과, 성능 지표, 중요도 맵 등의 실시간 피드백 및 시각화는 이제 **Weights & Biases (WandB)** 대시보드를 통해 제공됩니다. 이 WebSocket 메시지는 더 이상 사용되지 않습니다.
 
 ---
 

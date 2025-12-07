@@ -1025,190 +1025,37 @@ class MaskUpdateScheduler:
 
 ---
 
-## 4. 학습 파이프라인
+## 4. 모니터링 및 시각화 (WandB)
 
-### 4.1 Dataset
+이 프로젝트는 별도의 웹 대시보드를 구축하는 대신, MLOps 플랫폼인 **Weights & Biases (WandB)**를 사용하여 학습 과정과 실시간 추론 결과를 모니터링합니다. 서버는 `wandb` 라이브러리를 통해 주요 데이터를 WandB 대시보드로 비동기적으로 전송합니다.
 
-```python
-# sgaps/data/dataset.py
+### 4.1 연동 방식
 
-import torch
-from torch.utils.data import Dataset
-import h5py
-import numpy as np
+-   **초기화**: 서버 시작 시 (`main.py`) `wandb.init()`을 호출하여 WandB 세션을 생성합니다.
+-   **로깅**: 실시간 추론 중 (`websocket.py`) 또는 학습 중 (`trainer.py`)에 `wandb.log()` API를 호출하여 데이터를 전송합니다. 이 호출은 비동기적으로 작동하여 메인 스레드의 성능에 영향을 최소화합니다.
 
-class SGAPSDataset(Dataset):
-    """SGAPS 학습용 데이터셋"""
+### 4.2 주요 모니터링 항목
 
-    def __init__(self, episode_paths, config, transforms=None):
-        self.episode_paths = episode_paths
-        self.config = config
-        self.transforms = transforms
-        self.max_state_dim = config.model.max_state_dim
-        self.sentinel_value = config.model.sentinel_value
+WandB 대시보드에서 다음과 같은 항목들을 실시간으로 확인할 수 있습니다.
 
-        # 모든 에피소드의 프레임 인덱스 생성
-        self.frame_indices = []
-        for ep_path in episode_paths:
-            with h5py.File(ep_path, 'r') as f:
-                num_frames = len(f['frames'].keys())
-                for i in range(num_frames):
-                    self.frame_indices.append((ep_path, i))
-
-    def __len__(self):
-        return len(self.frame_indices)
-
-    def __getitem__(self, idx):
-        ep_path, frame_idx = self.frame_indices[idx]
-
-        with h5py.File(ep_path, 'r') as f:
-            frame_group = f['frames'][f'frame_{frame_idx:04d}']
-
-            sparse_pixels = frame_group['pixels'][:]  # [N, 3]
-            gt_frame = frame_group['ground_truth'][:]  # [H, W]
-            resolution = tuple(frame_group.attrs['resolution'])
-
-            # 상태 벡터 로드 (가변 길이 → 고정 길이 패딩)
-            raw_state = frame_group['state_vector'][:] if 'state_vector' in frame_group else []
-            state_vector = np.full(self.max_state_dim, self.sentinel_value, dtype=np.float32)
-            if len(raw_state) > 0:
-                state_vector[:len(raw_state)] = raw_state
-
-        # 상태 마스크 생성 (sentinel이 아닌 위치 = 1)
-        state_mask = (state_vector != self.sentinel_value).astype(np.float32)
-
-        # 데이터 증강
-        if self.transforms:
-            sparse_pixels, gt_frame = self.transforms(sparse_pixels, gt_frame)
-
-        return {
-            "sparse_pixels": torch.from_numpy(sparse_pixels).float(),
-            "gt_frame": torch.from_numpy(gt_frame).float().unsqueeze(0),  # [1, H, W]
-            "state_vector": torch.from_numpy(state_vector).float(),
-            "state_mask": torch.from_numpy(state_mask).float(),
-            "num_pixels": len(sparse_pixels),
-            "resolution": resolution
-        }
-```
-
-### 4.2 Trainer
+-   **실시간 복원 프레임**: `wandb.Image`를 통해 매 프레임 또는 N 프레임 단위로 복원된 이미지를 시각적으로 확인합니다.
+-   **중요도 맵 (Importance Map)**: Attention Entropy로부터 계산된 중요도 맵을 Heatmap 이미지로 시각화하여, 모델이 프레임의 어떤 부분에 집중하고 있는지 분석합니다.
+-   **샘플링 좌표**: 적응형 샘플링에 의해 선택된 UV 좌표를 이미지 위에 점으로 표시하여 샘플링 분포를 확인합니다.
+-   **성능 지표**: PSNR, SSIM 등의 품질 지표를 실시간 차트로 확인하여 성능 변화를 추적합니다.
+-   **시스템 리소스**: 서버의 GPU 온도, 사용률, 메모리 사용량 등을 모니터링합니다.
 
 ```python
-# sgaps/training/trainer.py
-
-import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader
-from tqdm import tqdm
+# websocket.py 에서의 로깅 예시
 import wandb
+from PIL import Image
 
-class SGAPSTrainer:
-    def __init__(self, model, train_loader, val_loader, config):
-        self.model = model
-        self.train_loader = train_loader
-        self.val_loader = val_loader
-        self.config = config
-
-        # Optimizer
-        self.optimizer = torch.optim.AdamW(
-            model.parameters(),
-            lr=config.training.learning_rate,
-            weight_decay=config.training.weight_decay
-        )
-
-        # Scheduler
-        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            self.optimizer,
-            T_max=config.training.num_epochs
-        )
-
-        # Loss
-        from sgaps.models.losses import SGAPSLoss
-        self.criterion = SGAPSLoss(config)
-
-        # Mixed Precision
-        self.scaler = torch.cuda.amp.GradScaler()
-
-        self.device = torch.device("cuda")
-        self.model.to(self.device)
-
-    def train_epoch(self, epoch):
-        self.model.train()
-        total_loss = 0
-        progress = tqdm(self.train_loader, desc=f"Epoch {epoch}")
-
-        for batch in progress:
-            sparse_pixels = batch["sparse_pixels"].to(self.device)
-            gt_frame = batch["gt_frame"].to(self.device)
-            state_vector = batch["state_vector"].to(self.device)
-            state_mask = batch["state_mask"].to(self.device)
-            num_pixels = batch["num_pixels"]
-            resolution = batch["resolution"][0]
-
-            # Forward (상태 벡터 포함)
-            with torch.cuda.amp.autocast():
-                pred = self.model(sparse_pixels, state_vector, state_mask, resolution)
-                losses = self.criterion(pred, gt_frame, num_pixels)
-
-            # Backward
-            self.optimizer.zero_grad()
-            self.scaler.scale(losses["total"]).backward()
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
-
-            total_loss += losses["total"].item()
-
-            # Wandb 로깅
-            wandb.log({
-                "train/loss": losses["total"].item(),
-                "train/mse": losses["mse"],
-                "train/perceptual": losses["perceptual"],
-                "train/lr": self.optimizer.param_groups[0]["lr"]
-            })
-
-            progress.set_postfix(loss=losses["total"].item())
-
-        return total_loss / len(self.train_loader)
-
-    def validate(self, epoch):
-        self.model.eval()
-        total_psnr = 0
-        total_ssim = 0
-
-        from sgaps.utils.metrics import calculate_psnr, calculate_ssim
-
-        with torch.no_grad():
-            for batch in tqdm(self.val_loader, desc="Validation"):
-                sparse_pixels = batch["sparse_pixels"].to(self.device)
-                gt_frame = batch["gt_frame"].to(self.device)
-                resolution = batch["resolution"][0]
-
-                pred = self.model(sparse_pixels, resolution)
-
-                psnr = calculate_psnr(pred, gt_frame)
-                ssim = calculate_ssim(pred, gt_frame)
-
-                total_psnr += psnr
-                total_ssim += ssim
-
-        avg_psnr = total_psnr / len(self.val_loader)
-        avg_ssim = total_ssim / len(self.val_loader)
-
-        wandb.log({
-            "val/psnr": avg_psnr,
-            "val/ssim": avg_ssim
-        })
-
-        return avg_psnr, avg_ssim
-
-    def save_checkpoint(self, epoch, psnr):
-        torch.save({
-            "epoch": epoch,
-            "model_state_dict": self.model.state_dict(),
-            "optimizer_state_dict": self.optimizer.state_dict(),
-            "psnr": psnr,
-            "config": self.config
-        }, f"checkpoints/spt_epoch{epoch}_psnr{psnr:.2f}.pth")
+# ... 프레임 복원 및 분석 후 ...
+wandb.log({
+    "Live/Reconstruction": wandb.Image(Image.fromarray(reconstructed_frame)),
+    "Live/Importance Map": wandb.Image(Image.fromarray(importance_heatmap)),
+    "Metrics/Live PSNR": psnr_value,
+    "Session/Active Clients": manager.active_connection_count
+})
 ```
 
 ---
