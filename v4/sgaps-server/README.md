@@ -17,21 +17,22 @@ conda activate sgaps-server
 
 ### 2. PyTorch 설치
 
-Conda를 사용하면 CUDA 의존성을 포함하여 PyTorch를 더 쉽게 설치할 수 있습니다. **먼저 이 단계를 진행한 후, 다음 단계로 넘어가세요.**
-
-시스템에 맞는 올바른 PyTorch 버전을 설치하는 것이 매우 중요합니다.
-자세한 내용은 [PyTorch 공식 홈페이지](https://pytorch.org/get-started/locally/)에서 Conda용 설치 명령을 확인하세요.
-
 **GPU (CUDA) 사용 시:**
-NVIDIA GPU가 설치되어 있는 경우, 다음 예시와 같이 PyTorch와 CUDA 툴킷을 함께 설치합니다. (아래는 CUDA 12.1 기준)
 
 ```bash
-conda install pytorch torchvision torchaudio pytorch-cuda=12.1 -c pytorch -c nvidia
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+
+# 또는 CUDA 11.8
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+
+# 확인
+python -c "import torch; print('PyTorch:', torch.__version__); print('CUDA available:', torch.cuda.is_available())"
 ```
 
 **CPU만 사용 시:**
+
 ```bash
-conda install pytorch torchvision torchaudio cpuonly -c pytorch
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
 ```
 
 ### 3. 나머지 의존성 설치
@@ -48,6 +49,12 @@ pip install -r requirements.txt
 
 ```bash
 uvicorn main:app --reload
+```
+
+또는
+
+```bash
+python main.py
 ```
 
 서버가 시작되면, 기본적으로 `http://127.0.0.1:8000/docs` 주소에서 API 문서를 확인할 수 있습니다.

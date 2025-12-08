@@ -7,327 +7,242 @@ for frame data streaming and UV coordinate distribution.
 
 import json
 import logging
-import asyncio
-from typing import Dict, Any, Optional, Set
-from dataclasses import dataclass, field
 import time
+import asyncio
+from typing import Dict, Any, Optional
+from pathlib import Path
+import numpy as np
+from PIL import Image
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel
 from omegaconf import DictConfig
 
 from sgaps.core.session_manager import SessionManager, Session
 from sgaps.core.sampler import FixedUVSampler
-from sgaps.core.reconstructor import OpenCVReconstructor
-from sgaps.data.storage import HDF5Storage
-
+from sgaps.core.reconstructor import FrameReconstructor
+from sgaps.utils.metrics import compute_all_metrics
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-# Server configuration (set by main.py during startup)
+# --- Global Objects (Initialized from main.py) ---
 _server_config: Optional[DictConfig] = None
-
+_reconstructor: Optional[FrameReconstructor] = None
+try:
+    import wandb
+    USE_WANDB = True
+except ImportError:
+    USE_WANDB = False
+# ----------------------------------------------------
 
 def set_server_config(cfg: DictConfig):
-    """Set server configuration from main.py."""
+    """Sets the global server configuration."""
     global _server_config
     _server_config = cfg
-    logger.info(f"Server config set: max_state_dim={cfg.max_state_dim}, "
-                f"sample_count={cfg.sampling.default_sample_count}, "
-                f"target_fps={cfg.target_fps}, sentinel_value={cfg.sentinel_value}")
+    logger.info("Server config set for WebSocket API.")
 
+def set_reconstructor(reconstructor: FrameReconstructor):
+    """Sets the global frame reconstructor instance."""
+    global _reconstructor
+    _reconstructor = reconstructor
+    logger.info("Frame reconstructor set for WebSocket API.")
 
 def get_server_config() -> DictConfig:
-    """Get server configuration."""
+    """Gets the server configuration."""
     if _server_config is None:
-        raise RuntimeError("Server configuration not initialized. Call set_server_config first.")
+        raise RuntimeError("Server configuration not initialized.")
     return _server_config
 
+def get_reconstructor() -> FrameReconstructor:
+    """Gets the frame reconstructor."""
+    if _reconstructor is None:
+        raise RuntimeError("Frame reconstructor not initialized.")
+    return _reconstructor
 
 class ConnectionManager:
-    """
-    Manages WebSocket connections and session lifecycle.
-    
-    Handles connection tracking, message routing, and cleanup.
-    """
-    
+    """Manages WebSocket connections and session data."""
     def __init__(self):
         self.active_connections: Dict[str, WebSocket] = {}
         self.sessions: Dict[str, Session] = {}
         self.session_manager = SessionManager()
         self._lock = asyncio.Lock()
-    
-    async def connect(self, websocket: WebSocket, client_id: str) -> bool:
-        """Accept a new WebSocket connection."""
-        try:
-            await websocket.accept()
-            async with self._lock:
-                self.active_connections[client_id] = websocket
-            logger.info(f"Client {client_id} connected")
-            
-            # Send connection acknowledgment
-            await self.send_message(client_id, {
-                "type": "connection_ack",
-                "payload": {
-                    "client_id": client_id,
-                    "server_version": "0.1.0"
-                }
-            })
-            return True
-        except Exception as e:
-            logger.error(f"Failed to accept connection from {client_id}: {e}")
-            return False
-    
+        self.global_wandb_step = 0  # Global monotonic step counter for WandB logging
+
+    async def connect(self, websocket: WebSocket, client_id: str):
+        await websocket.accept()
+        async with self._lock:
+            self.active_connections[client_id] = websocket
+        logger.info(f"Client {client_id} connected.")
+
     async def disconnect(self, client_id: str):
-        """Handle client disconnection and cleanup."""
         async with self._lock:
             if client_id in self.active_connections:
                 del self.active_connections[client_id]
-            
             if client_id in self.sessions:
-                session = self.sessions[client_id]
+                session = self.sessions.pop(client_id)
                 await self.session_manager.end_session(session)
-                del self.sessions[client_id]
-        
-        logger.info(f"Client {client_id} disconnected")
-    
-    async def send_message(self, client_id: str, message: Dict[str, Any]):
-        """Send a JSON message to a specific client."""
-        if client_id not in self.active_connections:
-            logger.warning(f"Cannot send message: client {client_id} not connected")
-            return
-        
-        websocket = self.active_connections[client_id]
-        try:
-            await websocket.send_json(message)
-        except Exception as e:
-            logger.error(f"Failed to send message to {client_id}: {e}")
-    
-    async def broadcast(self, message: Dict[str, Any]):
-        """Broadcast a message to all connected clients."""
-        for client_id in list(self.active_connections.keys()):
-            await self.send_message(client_id, message)
-    
-    def get_session(self, client_id: str) -> Optional[Session]:
-        """Get the session for a client."""
-        return self.sessions.get(client_id)
-    
-    async def create_session(self, client_id: str, config: Dict[str, Any]) -> Session:
-        """Create a new session for a client."""
+        logger.info(f"Client {client_id} disconnected and session ended.")
+
+    async def send_json(self, client_id: str, message: dict):
+        if client_id in self.active_connections:
+            await self.active_connections[client_id].send_json(message)
+
+    async def create_session(self, client_id: str, payload: dict) -> Session:
+        cfg = get_server_config()
+
+        # Use server-configured resolution for reconstruction
+        # UV coordinates are normalized (0-1), so client resolution doesn't matter
+        server_resolution = tuple(cfg.data.resolution)
+
+        # Log client resolution for debugging
+        client_resolution = payload.get("resolution", None)
+        if client_resolution:
+            logger.info(f"Client resolution: {client_resolution}, Server reconstruction: {server_resolution}")
+
         session = await self.session_manager.create_session(
             client_id=client_id,
-            checkpoint_key=config.get("checkpoint_key", "default"),
-            max_state_dim=config.get("max_state_dim", 64),
-            resolution=tuple(config.get("resolution", [640, 480]))
+            checkpoint_key=payload.get("checkpoint_key", "default"),
+            max_state_dim=cfg.model.input_constraints.max_state_dim,
+            resolution=server_resolution
         )
-        
         async with self._lock:
             self.sessions[client_id] = session
-        
         return session
 
+    def get_session(self, client_id: str) -> Optional[Session]:
+        return self.sessions.get(client_id)
 
-# Global connection manager instance
 manager = ConnectionManager()
-
 
 @router.websocket("/stream")
 async def websocket_endpoint(websocket: WebSocket):
-    """
-    Main WebSocket endpoint for frame streaming.
-    
-    Protocol:
-    1. Client connects and receives connection_ack
-    2. Client sends session_start with configuration
-    3. Server responds with session_start_ack and initial UV coordinates
-    4. Client sends frame_data with sampled pixels
-    5. Server processes and sends updated UV coordinates
-    6. Repeat steps 4-5 until disconnect
-    """
-    # Generate unique client ID
-    client_id = f"client_{id(websocket)}_{int(time.time() * 1000)}"
-    
-    # Accept connection
-    if not await manager.connect(websocket, client_id):
-        return
-    
+    client_id = f"client_{id(websocket)}"
+    await manager.connect(websocket, client_id)
     try:
         while True:
-            # Receive message
             data = await websocket.receive_json()
             await handle_message(client_id, data)
-            
     except WebSocketDisconnect:
-        logger.info(f"Client {client_id} disconnected normally")
+        logger.info(f"Client {client_id} disconnected normally.")
     except Exception as e:
-        logger.error(f"Error handling client {client_id}: {e}")
-        await manager.send_message(client_id, {
-            "type": "error",
-            "payload": {
-                "code": "INTERNAL_ERROR",
-                "message": str(e)
-            }
-        })
+        logger.error(f"Error with client {client_id}: {e}", exc_info=True)
     finally:
         await manager.disconnect(client_id)
 
-
-async def handle_message(client_id: str, data: Dict[str, Any]):
-    """Route incoming messages to appropriate handlers."""
+async def handle_message(client_id: str, data: dict):
     message_type = data.get("type")
     payload = data.get("payload", {})
     
-    handlers = {
-        "session_start": handle_session_start,
-        "frame_data": handle_frame_data,
-        "heartbeat": handle_heartbeat,
-    }
-    
-    handler = handlers.get(message_type)
-    if handler:
-        await handler(client_id, payload)
+    if message_type == "session_start":
+        await handle_session_start(client_id, payload)
+    elif message_type == "frame_data":
+        await handle_frame_data(client_id, payload)
+    elif message_type == "heartbeat":
+        await manager.send_json(client_id, {"type": "heartbeat_ack", "payload": {"timestamp": time.time()}})
     else:
         logger.warning(f"Unknown message type from {client_id}: {message_type}")
-        await manager.send_message(client_id, {
-            "type": "error",
-            "payload": {
-                "code": "UNKNOWN_MESSAGE_TYPE",
-                "message": f"Unknown message type: {message_type}"
-            }
-        })
+        await manager.send_json(client_id, {"type": "error", "payload": {"message": "Unknown message type"}})
 
-
-async def handle_session_start(client_id: str, payload: Dict[str, Any]):
-    """
-    Handle session_start message.
-    
-    Creates a new session and sends initial UV coordinates.
-    Server controls sample_count and max_state_dim - client receives these values.
-    Note: sentinel_value is server-internal (used for state vector padding) and NOT sent to client.
-    """
-    logger.info(f"Session start from {client_id}: {payload}")
-    
-    # Get server configuration (sample_count and max_state_dim are server-controlled)
+async def handle_session_start(client_id: str, payload: dict):
+    logger.info(f"Starting session for {client_id} with payload: {payload}")
+    session = await manager.create_session(client_id, payload)
     cfg = get_server_config()
-    sample_count = cfg.sampling.default_sample_count
-    max_state_dim = cfg.max_state_dim
-    target_fps = cfg.target_fps
-    # sentinel_value is server-internal only (for padding state vectors), not sent to client
+    reconstructor = get_reconstructor()
+
+    # The new reconstructor handles model loading internally via get_model
+    # We can check if the model exists to set the 'checkpoint_loaded' flag
+    model_path = Path(cfg.paths.checkpoint_dir) / session.checkpoint_key / "best.pth"
+    checkpoint_loaded = model_path.exists()
     
-    # Resolution comes from client (screen resolution)
-    resolution = tuple(payload.get("resolution", [640, 480]))
-    
-    # Create session config with server-controlled parameters
-    session_config = {
-        "checkpoint_key": payload.get("checkpoint_key", "default"),
-        "max_state_dim": max_state_dim,
-        "resolution": resolution
-    }
-    
-    # Create session
-    session = await manager.create_session(client_id, session_config)
-    
-    # Generate initial UV coordinates using server-controlled sample_count
-    sampler = FixedUVSampler(
-        sample_count=sample_count,
-        resolution=resolution
-    )
+    # Generate initial UV coordinates
+    sampler = FixedUVSampler(sample_count=cfg.sampling.default_sample_count, resolution=session.resolution)
     initial_coords = sampler.generate_uniform_grid()
-    
-    # Store sampler in session
     session.sampler = sampler
 
-    # Create and test the reconstructor
-    reconstructor = OpenCVReconstructor()
-    checkpoint_loaded = reconstructor.load_checkpoint(session.checkpoint_key)
-    
-    # Send acknowledgment with server-controlled parameters
-    # Client MUST use these values for sampling and state vector collection
-    # Note: sentinel_value is NOT sent - it's server-internal for padding state vectors
-    await manager.send_message(client_id, {
+    await manager.send_json(client_id, {
         "type": "session_start_ack",
         "payload": {
             "checkpoint_key": session.checkpoint_key,
             "checkpoint_loaded": checkpoint_loaded,
-            "model_version": "opencv_inpaint_v1",
-            "sample_count": sample_count,
-            "max_state_dim": max_state_dim,
-            "target_fps": target_fps,
-            "resolution": list(resolution)
+            "model_version": f"spt_{cfg.model.name}",
+            "sample_count": cfg.sampling.default_sample_count,
+            "max_state_dim": cfg.model.input_constraints.max_state_dim,
+            "target_fps": cfg.target_fps,
+            "resolution": list(session.resolution)
         }
     })
-    
-    # Send initial UV coordinates
-    await manager.send_message(client_id, {
+    await manager.send_json(client_id, {
         "type": "uv_coordinates",
-        "payload": {
-            "target_frame_id": 0,
-            "coordinates": [{"u": u, "v": v} for u, v in initial_coords]
-        }
+        "payload": {"target_frame_id": 0, "coordinates": [{"u": u, "v": v} for u, v in initial_coords]}
     })
-    
-    logger.info(f"Session created for {client_id}: sample_count={sample_count}, "
-                f"max_state_dim={max_state_dim}, target_fps={target_fps}, "
-                f"resolution={resolution}, sent {len(initial_coords)} UV coordinates")
+    logger.info(f"Session for {client_id} configured and initial coordinates sent.")
 
-
-async def handle_frame_data(client_id: str, payload: Dict[str, Any]):
-    """
-    Handle frame_data message.
-    
-    Stores the frame data, performs reconstruction (Phase 1: placeholder),
-    and sends UV coordinates for the next frame.
-    """
+async def handle_frame_data(client_id: str, payload: dict):
     session = manager.get_session(client_id)
     if not session:
-        await manager.send_message(client_id, {
-            "type": "error",
-            "payload": {
-                "code": "NO_SESSION",
-                "message": "No active session. Send session_start first."
-            }
-        })
         return
-    
+
     frame_id = payload.get("frame_id", 0)
-    pixels = payload.get("pixels", [])
-    state_vector = payload.get("state_vector", [])
-    resolution = tuple(payload.get("resolution", [640, 480]))
-    
-    # Store frame data
-    await session.storage.store_frame(
-        frame_id=frame_id,
-        pixels=pixels,
-        state_vector=state_vector,
-        resolution=resolution
+
+    # Allocate global step for WandB (thread-safe increment)
+    async with manager._lock:
+        global_step = manager.global_wandb_step
+        manager.global_wandb_step += 1
+
+    # 1. Parse data into NumPy arrays
+    pixels = np.array([(p['u'], p['v'], p['value']) for p in payload.get("pixels", [])], dtype=np.float32)
+    state_vector = np.array(payload.get("state_vector", []), dtype=np.float32)
+
+    # 1.5. Pad state vector to max_state_dim for model compatibility
+    cfg = get_server_config()
+    sentinel_value = cfg.model.sentinel_value
+    max_state_dim = session.max_state_dim
+
+    padded_state_vector = np.full(max_state_dim, sentinel_value, dtype=np.float32)
+    if len(state_vector) > 0:
+        copy_len = min(len(state_vector), max_state_dim)
+        padded_state_vector[:copy_len] = state_vector[:copy_len]
+
+    state_mask = (padded_state_vector != sentinel_value).astype(np.float32)
+    state_vector = padded_state_vector  # Replace with padded version
+
+    # 2. Store frame data to HDF5 (non-blocking background task)
+    if session.storage:
+        asyncio.create_task(
+            session.storage.store_frame(
+                frame_id=frame_id,
+                pixels=payload.get("pixels", []),
+                state_vector=state_vector.tolist(),
+                resolution=session.resolution
+            )
+        )
+
+    # 3. Perform reconstruction
+    reconstructor = get_reconstructor()
+    reconstructed_frame, attn_weights = await reconstructor.reconstruct(
+        pixels, state_vector, session.resolution, session.checkpoint_key
     )
-    
-    # Update session stats
-    session.frame_count += 1
-    
-    # Phase 1: Fixed UV coordinates (no adaptive sampling yet)
-    # Just resend the same coordinates for next frame
+
+    # 4. Log to WandB (if enabled)
+    if USE_WANDB:
+        log_payload = {
+            "Session/Frame_ID": frame_id,           # Per-session frame number
+            "Session/Client_ID": client_id,         # Session identifier
+            "Session/Global_Step": global_step      # Global step for reference
+        }
+        if reconstructed_frame is not None:
+            log_payload["Live/Reconstruction"] = wandb.Image(Image.fromarray(reconstructed_frame))
+        # Add metrics and other visualizations later
+        wandb.log(log_payload, step=global_step)
+
+    # 5. Send back next UV coordinates (currently fixed)
     if session.sampler:
         coords = session.sampler.get_current_coordinates()
-        await manager.send_message(client_id, {
+        await manager.send_json(client_id, {
             "type": "uv_coordinates",
-            "payload": {
-                "target_frame_id": frame_id + 1,
-                "coordinates": [{"u": u, "v": v} for u, v in coords]
-            }
+            "payload": {"target_frame_id": frame_id + 1, "coordinates": [{"u": u, "v": v} for u, v in coords]}
         })
-    
-    # Log progress periodically
+
+    session.frame_count += 1
     if session.frame_count % 100 == 0:
-        logger.info(f"Session {client_id}: processed {session.frame_count} frames")
-
-
-async def handle_heartbeat(client_id: str, payload: Dict[str, Any]):
-    """Handle heartbeat message to keep connection alive."""
-    await manager.send_message(client_id, {
-        "type": "heartbeat_ack",
-        "payload": {
-            "timestamp": time.time()
-        }
-    })
+        logger.info(f"Session {client_id}: processed {session.frame_count} frames.")

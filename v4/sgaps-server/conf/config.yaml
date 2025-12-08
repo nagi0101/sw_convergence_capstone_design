@@ -4,12 +4,28 @@ defaults:
     - server: development
     - sampling: uniform
     - mask_update: fixed
+    - training: phase1
+    - data: base
+    - logging: wandb
     - _self_
 
-# Global settings
+# --- Paths ---
+# Referenced by other config files like data/base.yaml
+paths:
+    data_root: "./data"
+    checkpoint_dir: "./checkpoints"
+    output_dir: "./outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}"
+
+# --- Hydra Settings ---
+hydra:
+    run:
+        dir: ${paths.output_dir}
+
+# --- Global settings ---
 max_state_dim: 64
 sentinel_value: -999.0
 target_fps: 10
+seed: 42
 
 # Data storage
 storage:
@@ -23,26 +39,42 @@ reconstruction:
 
 # Model settings (Phase 2: Sparse Pixel Transformer)
 model:
-    embed_dim: 256 # 임베딩 차원
-    num_heads: 8 # Attention heads
-    num_encoder_layers: 6 # Sparse Transformer Encoder layers
-    num_decoder_layers: 4 # Cross-Attention Decoder layers
-    feedforward_dim: 1024 # FFN 중간 차원
-    # NOTE: dropout은 정규화(regularization) 용도로만 사용됨
-    # 불확실성 추정은 Attention Entropy 기반으로 수행 (Monte Carlo Dropout 미사용)
-    dropout: 0.1
-    # Phase 1: Grayscale (1 channel), Phase 2+: RGB (3 channels)
+    name: "spt_base"
+
+    # Input constraints
+    input_constraints:
+        max_state_dim: ${max_state_dim}
+
+    # Sentinel value for state masking (spt.py:54 requires this)
+    sentinel_value: ${sentinel_value}
+
+    # Architecture parameters (spt.py:49-52, 76-77 requires this structure)
+    architecture:
+        embed_dim: 256 # 임베딩 차원
+        num_heads: 8 # Attention heads
+        num_encoder_layers: 6 # Sparse Transformer Encoder layers
+        num_decoder_layers: 4 # Cross-Attention Decoder layers
+        feedforward_dim: 1024 # FFN 중간 차원
+        dropout: 0.1
+
+    # Positional encoding settings (spt.py:69 requires this)
+    positional_encoding:
+        max_freq: 10
+        num_bands: 64 # embed_dim // 4
+
+    # CNN Refinement Head
+    refinement_head:
+        channels: [128, 64, 32] # Progressive channel reduction
+
+    # Color channels (for future RGB support)
     color_channels: 1
 
 # Loss function settings (Phase 3)
 loss:
     # MVP: Sampled Pixel L2 Loss only
-    # 샘플링된 픽셀 위치에서만 L2 손실 계산
     type: "sampled_pixel_l2"
 
 # Importance calculation settings (Phase 2)
 importance:
-    # Attention Entropy 기반 중요도 계산
-    # Decoder Cross-Attention의 엔트로피를 활용
     method: "attention_entropy"
     epsilon: 1.0e-9 # log(0) 방지용

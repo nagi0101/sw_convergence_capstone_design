@@ -19,10 +19,11 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig
 
-from sgaps.api.websocket import router as ws_router, set_server_config
+from sgaps.api.websocket import router as ws_router, set_server_config, set_reconstructor
 from sgaps.api.rest import router as rest_router
+from sgaps.core.reconstructor import FrameReconstructor
 
 
 # Global config holder
@@ -35,46 +36,33 @@ def get_config() -> DictConfig:
 
 
 def load_default_config() -> DictConfig:
-    """Load default configuration from yaml files."""
-    from omegaconf import OmegaConf
-    
-    config_path = os.path.join(os.path.dirname(__file__), "conf")
-    
-    # Load base config
-    base_config = OmegaConf.load(os.path.join(config_path, "config.yaml"))
-    
-    # Load server config
-    defaults = base_config.get("defaults", [])
-    server_config_name = "development"
-    sampling_config_name = "uniform"
-    
-    for default in defaults:
-        if isinstance(default, dict):
-            if "server" in default:
-                server_config_name = default["server"]
-            if "sampling" in default:
-                sampling_config_name = default["sampling"]
-    
-    server_config_path = os.path.join(config_path, "server", f"{server_config_name}.yaml")
-    if os.path.exists(server_config_path):
-        server_config = OmegaConf.load(server_config_path)
-        base_config.server = OmegaConf.merge(base_config.get("server", {}), server_config)
-    
-    # Load sampling config
-    sampling_config_path = os.path.join(config_path, "sampling", f"{sampling_config_name}.yaml")
-    if os.path.exists(sampling_config_path):
-        sampling_config = OmegaConf.load(sampling_config_path)
-        base_config.sampling = OmegaConf.merge(base_config.get("sampling", {}), sampling_config)
-    
-    return base_config
+    """Load default configuration using Hydra's compose API."""
+    from hydra import compose, initialize_config_dir
+
+    # Get absolute path to config directory
+    config_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "conf")
+
+    # Initialize Hydra with the config directory
+    with initialize_config_dir(version_base=None, config_dir=config_dir):
+        # Compose configuration - Hydra handles all the defaults merging
+        cfg = compose(config_name="config")
+
+    return cfg
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler for startup/shutdown."""
     logging.info("SGAPS-MAE Server starting up...")
-    if _config:
-        logging.info(f"Configuration:\n{OmegaConf.to_yaml(_config)}")
+
+    # Initialize and set the reconstructor for the WebSocket API
+    try:
+        reconstructor = FrameReconstructor(_config)
+        set_reconstructor(reconstructor)
+        logging.info("FrameReconstructor initialized and set for WebSocket API.")
+    except Exception as e:
+        logging.error(f"Failed to initialize FrameReconstructor: {e}", exc_info=True)
+
     yield
     logging.info("SGAPS-MAE Server shutting down...")
 
@@ -89,6 +77,22 @@ def create_app(cfg: DictConfig = None) -> FastAPI:
     
     # Set server config for WebSocket handlers
     set_server_config(cfg)
+
+    # Initialize Weights & Biases if configured
+    if cfg.logging.type == "wandb":
+        try:
+            import wandb
+            wandb.init(
+                project=cfg.logging.wandb.project,
+                entity=cfg.logging.wandb.entity,
+                name=cfg.logging.wandb.name,
+                config=dict(cfg) if cfg else {}
+            )
+            logging.info("Weights & Biases initialized successfully.")
+        except ImportError:
+            logging.warning("WandB not installed. Skipping initialization.")
+        except Exception as e:
+            logging.error(f"Failed to initialize Weights & Biases: {e}")
     
     # Logging is configured by uvicorn, which is passed the log_level from config.
     # BasicConfig can interfere with uvicorn's more sophisticated logging setup.

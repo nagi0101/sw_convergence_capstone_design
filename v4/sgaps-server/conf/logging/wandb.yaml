@@ -1,0 +1,6 @@
+type: wandb
+
+wandb:
+    project: "sgaps-v4-test"
+    entity: null # Your wandb entity, or null for personal account
+    name: ${now:%Y%m%d_%H%M%S}
