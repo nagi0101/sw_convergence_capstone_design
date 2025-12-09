@@ -1,0 +1,25 @@
+# Adaptive Importance-based Sampling Configuration
+# Phase 3: Attention entropy-driven adaptive pixel sampling
+
+pattern: "adaptive_importance"
+
+# Sample count constraints
+default_sample_count: 500
+min_sample_count: 250
+max_sample_count: 1000
+
+# Importance calculation settings
+importance:
+    method: "attention_entropy"  # Shannon entropy of attention distribution
+    epsilon: 1.0e-9              # Numerical stability for log calculations
+    normalize: true              # Normalize importance map to [0, 1]
+
+# Sampling distribution strategy
+distribution:
+    importance_ratio: 0.6  # 60% from high-importance regions
+    uniform_ratio: 0.4     # 40% uniform coverage (prevent overfitting)
+
+# Update behavior
+update:
+    frequency: 1            # Update sampling every N frames (1 = every frame)
+    warmup_frames: 10       # Use uniform sampling for first N frames (cold start)

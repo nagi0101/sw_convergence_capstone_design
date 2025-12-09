@@ -1,0 +1,37 @@
+# Hybrid Sampling Configuration
+# Phase 3: Multi-strategy sampling with importance + uniform + random
+
+pattern: "hybrid"
+
+# Sample count constraints
+default_sample_count: 500
+min_sample_count: 250
+max_sample_count: 1000
+
+# Multi-strategy composition
+# Note: Current implementation uses importance + uniform (2 strategies)
+# Future versions may support the 3-strategy approach below
+strategies:
+    - name: "importance_based"
+      weight: 0.6
+      method: "attention_entropy"
+    - name: "uniform_grid"
+      weight: 0.3
+    - name: "random"
+      weight: 0.1
+
+# Importance calculation settings (for importance-based strategy)
+importance:
+    method: "attention_entropy"
+    epsilon: 1.0e-9
+    normalize: true
+
+# Sampling distribution (currently active implementation)
+distribution:
+    importance_ratio: 0.6  # 60% from high-importance regions
+    uniform_ratio: 0.4     # 40% uniform coverage
+
+# Update behavior
+update:
+    frequency: 1            # Update sampling every N frames
+    warmup_frames: 10       # Use uniform sampling for first N frames

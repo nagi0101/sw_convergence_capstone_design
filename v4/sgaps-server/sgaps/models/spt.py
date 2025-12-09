@@ -60,16 +60,39 @@ class CrossAttentionDecoderLayer(nn.Module):
         self.norm2 = nn.LayerNorm(d_model)
         self.dropout2 = nn.Dropout(dropout)
 
-    def forward(self, tgt, memory, memory_key_padding_mask=None):
+    def forward(self, tgt, memory, memory_key_padding_mask=None, return_attn_weights=False):
+        """
+        Forward pass for cross-attention decoder layer.
+
+        Args:
+            tgt: Query tensor [B, num_queries, embed_dim]
+            memory: Key/Value tensor [B, num_keys, embed_dim]
+            memory_key_padding_mask: Padding mask for memory
+            return_attn_weights: If True, return attention weights
+
+        Returns:
+            tgt: Output tensor [B, num_queries, embed_dim]
+            attn_weights (optional): [B, num_heads, num_queries, num_keys]
+        """
         # Cross-Attention block (query: tgt, key/value: memory)
-        attn_output, _ = self.cross_attn(query=tgt, key=memory, value=memory, key_padding_mask=memory_key_padding_mask)
+        attn_output, attn_weights = self.cross_attn(
+            query=tgt,
+            key=memory,
+            value=memory,
+            key_padding_mask=memory_key_padding_mask,
+            need_weights=True,
+            average_attn_weights=False  # Keep all heads for analysis
+        )
         tgt = self.norm1(tgt + self.dropout1(attn_output))
-        
+
         # Feed-forward block
         ff_output = self.linear2(self.dropout(self.activation(self.linear1(tgt))))
         tgt = self.norm2(tgt + self.dropout2(ff_output))
-        
-        return tgt
+
+        if return_attn_weights:
+            return tgt, attn_weights  # [B, num_queries, embed_dim], [B, num_heads, num_queries, num_keys]
+        else:
+            return tgt
 
 class SparsePixelTransformer(nn.Module):
     """
@@ -232,8 +255,18 @@ class SparsePixelTransformer(nn.Module):
 
         # 9. Decoder: cross-attention between queries and encoded sparse pixels
         decoded = query_embeds
+        all_attn_weights = []
+
         for layer in self.decoder:
-            decoded = layer(tgt=decoded, memory=encoded)
+            if return_attention:
+                decoded, layer_attn = layer(
+                    tgt=decoded,
+                    memory=encoded,
+                    return_attn_weights=True
+                )
+                all_attn_weights.append(layer_attn)  # [B, num_heads, H*W, N]
+            else:
+                decoded = layer(tgt=decoded, memory=encoded)
         # Output: [B, H*W, embed_dim]
 
         # 10. Reshape to 2D spatial format
@@ -245,10 +278,17 @@ class SparsePixelTransformer(nn.Module):
 
         # 12. Return with or without attention weights
         if return_attention:
-            # Note: PyTorch's TransformerDecoder doesn't expose attention by default
-            # For now, return None as placeholder for future implementation
-            attn_weights = None
-            return output, attn_weights
+            # Aggregate attention weights: average across layers and heads
+            # Stack: [num_layers, B, num_heads, H*W, N]
+            stacked_attn = torch.stack(all_attn_weights, dim=0)
+
+            # Average across layers: [B, num_heads, H*W, N]
+            avg_attn_layers = stacked_attn.mean(dim=0)
+
+            # Average across heads: [B, H*W, N]
+            final_attn = avg_attn_layers.mean(dim=1)
+
+            return output, final_attn
         else:
             return output
 

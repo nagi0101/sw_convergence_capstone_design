@@ -2,7 +2,7 @@
 
 defaults:
     - server: development
-    - sampling: uniform
+    - sampling: adaptive      # Phase 3: Use adaptive importance-based sampling
     - mask_update: fixed
     - training: phase1
     - data: base

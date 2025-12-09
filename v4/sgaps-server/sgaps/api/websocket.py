@@ -154,9 +154,23 @@ async def handle_session_start(client_id: str, payload: dict):
     model_path = Path(cfg.paths.checkpoint_dir) / session.checkpoint_key / "best.pth"
     checkpoint_loaded = model_path.exists()
     
-    # Generate initial UV coordinates
-    sampler = FixedUVSampler(sample_count=cfg.sampling.default_sample_count, resolution=session.resolution)
-    initial_coords = sampler.generate_uniform_grid()
+    # Generate initial UV coordinates based on sampling strategy
+    if cfg.sampling.pattern in ["adaptive_importance", "hybrid"]:
+        from sgaps.core.sampler import AdaptiveUVSampler
+        sampler = AdaptiveUVSampler(
+            config=cfg.sampling,
+            resolution=session.resolution
+        )
+        logger.info(f"Using AdaptiveUVSampler for session {client_id}")
+    else:
+        # Default to uniform sampling
+        sampler = FixedUVSampler(
+            sample_count=cfg.sampling.default_sample_count,
+            resolution=session.resolution
+        )
+        logger.info(f"Using FixedUVSampler for session {client_id}")
+
+    initial_coords = sampler.get_current_coordinates()
     session.sampler = sampler
 
     await manager.send_json(client_id, {
@@ -223,6 +237,34 @@ async def handle_frame_data(client_id: str, payload: dict):
         pixels, state_vector, session.resolution, session.checkpoint_key
     )
 
+    # 3.5. Update adaptive sampler with importance map (if applicable)
+    if attn_weights is not None and hasattr(session.sampler, 'update_from_importance'):
+        from sgaps.core.importance import AttentionEntropyImportanceCalculator
+
+        try:
+            # Calculate importance map
+            importance_calc = AttentionEntropyImportanceCalculator(cfg)
+            importance_map = importance_calc.calculate(
+                attn_weights,
+                session.resolution
+            )[0]  # First batch item
+
+            # Update sampler for next frame
+            session.sampler.update_from_importance(importance_map)
+
+            # Log importance stats to WandB (if enabled)
+            if USE_WANDB:
+                importance_stats = importance_calc.compute_statistics(importance_map)
+                wandb.log({
+                    f"Importance/{client_id}/mean": importance_stats["mean"],
+                    f"Importance/{client_id}/max": importance_stats["max"],
+                    f"Importance/{client_id}/std": importance_stats["std"],
+                    f"Importance/{client_id}/entropy": importance_stats["importance_entropy"]
+                }, step=global_step)
+
+        except Exception as e:
+            logger.error(f"Error calculating importance map: {e}. Using static sampling.")
+
     # 4. Log to WandB (if enabled)
     if USE_WANDB:
         log_payload = {
@@ -235,7 +277,7 @@ async def handle_frame_data(client_id: str, payload: dict):
         # Add metrics and other visualizations later
         wandb.log(log_payload, step=global_step)
 
-    # 5. Send back next UV coordinates (currently fixed)
+    # 5. Send back next UV coordinates (updated by adaptive sampler if applicable)
     if session.sampler:
         coords = session.sampler.get_current_coordinates()
         await manager.send_json(client_id, {
