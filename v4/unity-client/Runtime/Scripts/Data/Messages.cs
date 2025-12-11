@@ -60,6 +60,11 @@ namespace SGAPS.Runtime.Data
         /// Number of samples to request.
         /// </summary>
         public int SampleCount;
+
+        /// <summary>
+        /// Client's debug mode request.
+        /// </summary>
+        public bool Debug;
     }
 
     /// <summary>
@@ -98,6 +103,7 @@ namespace SGAPS.Runtime.Data
         public string checkpoint_key;
         public bool checkpoint_loaded;
         public string model_version;
+        public bool debug_mode;  // NEW: Server tells client if debug is enabled
     }
 
     /// <summary>

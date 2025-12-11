@@ -40,6 +40,8 @@ class Session:
     frame_count: int = 0
     storage: Optional[HDF5Storage] = None
     sampler: Any = None  # FixedUVSampler, set later
+    debug_enabled: bool = False  # NEW: Per-session debug flag
+    debug_buffer: list = field(default_factory=list)
     
     @property
     def duration_seconds(self) -> float:

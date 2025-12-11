@@ -183,7 +183,7 @@ namespace SGAPS.Runtime.Core
         /// Sends session_start message to the server.
         /// Uses current screen resolution. Server will respond with sample_count and max_state_dim.
         /// </summary>
-        public void SendSessionStart()
+        public void SendSessionStart(bool debugMode = false)
         {
             if (!IsConnected)
             {
@@ -197,12 +197,13 @@ namespace SGAPS.Runtime.Core
                 payload = new
                 {
                     checkpoint_key = checkpointKey,
-                    resolution = new int[] { Screen.width, Screen.height }
+                    resolution = new int[] { Screen.width, Screen.height },
+                    debug = debugMode
                 }
             };
 
             SendJsonMessage(message);
-            Debug.Log($"[SGAPS.NetworkClient] Sent session_start message (resolution: {Screen.width}x{Screen.height}).");
+            Debug.Log($"[SGAPS.NetworkClient] Sent session_start message (resolution: {Screen.width}x{Screen.height}, debug={debugMode}).");
         }
 
         /// <summary>
@@ -227,6 +228,36 @@ namespace SGAPS.Runtime.Core
                     num_pixels = message.Pixels.Length,
                     pixels = ConvertPixelsToWireFormat(message.Pixels),
                     state_vector = message.StateVector
+                }
+            };
+
+            SendJsonMessage(wireMessage);
+        }
+
+        /// <summary>
+        /// Sends debug frame data to the server (includes full frame as Base64 PNG).
+        /// Only used when debug mode is enabled on both client and server.
+        /// </summary>
+        public void SendDebugFrameData(FrameDataMessage message, string fullFrameBase64)
+        {
+            if (!IsConnected)
+            {
+                Debug.LogWarning("[SGAPS.NetworkClient] Cannot send frame_data_debug: not connected.");
+                return;
+            }
+
+            var wireMessage = new
+            {
+                type = "frame_data_debug",
+                payload = new
+                {
+                    frame_id = message.FrameId,
+                    timestamp = message.Timestamp,
+                    resolution = new int[] { message.Resolution.x, message.Resolution.y },
+                    num_pixels = message.Pixels.Length,
+                    pixels = ConvertPixelsToWireFormat(message.Pixels),
+                    state_vector = message.StateVector,
+                    full_frame_base64 = fullFrameBase64
                 }
             };
 
@@ -402,6 +433,7 @@ namespace SGAPS.Runtime.Core
             string checkpointKey = payload?["checkpoint_key"]?.ToString();
             bool loaded = payload?["checkpoint_loaded"]?.ToObject<bool>() ?? false;
             string version = payload?["model_version"]?.ToString();
+            bool debugMode = payload?["debug_mode"]?.ToObject<bool>() ?? false;
 
             // Server-controlled parameters - client MUST use these values
             // Note: sentinel_value is server-internal (for padding) and NOT sent to client
@@ -413,7 +445,7 @@ namespace SGAPS.Runtime.Core
             Vector2Int resolution = new Vector2Int(resolutionArray[0], resolutionArray[1]);
 
             Debug.Log($"[SGAPS.NetworkClient] Session started - Checkpoint: {checkpointKey}, Loaded: {loaded}, " +
-                      $"Version: {version}, SampleCount: {sampleCount}, MaxStateDim: {maxStateDim}, " +
+                      $"Version: {version}, DebugMode: {debugMode}, SampleCount: {sampleCount}, MaxStateDim: {maxStateDim}, " +
                       $"TargetFPS: {targetFPS}, Resolution: {resolution.x}x{resolution.y}");
 
             var config = new SessionConfig(
@@ -423,7 +455,8 @@ namespace SGAPS.Runtime.Core
                 sampleCount: sampleCount,
                 maxStateDim: maxStateDim,
                 targetFPS: targetFPS,
-                resolution: resolution
+                resolution: resolution,
+                debugMode: debugMode
             );
 
             MainThreadDispatcher.Enqueue(() => OnSessionStarted?.Invoke(config));

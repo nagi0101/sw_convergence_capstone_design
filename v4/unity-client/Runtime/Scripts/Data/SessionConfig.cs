@@ -46,6 +46,12 @@ namespace SGAPS.Runtime.Data
         public Vector2Int Resolution;
 
         /// <summary>
+        /// Whether debug mode is enabled on the server.
+        /// When true, client should send full frames for visualization.
+        /// </summary>
+        public bool DebugMode;
+
+        /// <summary>
         /// Creates an empty session config.
         /// </summary>
         public SessionConfig()
@@ -57,6 +63,7 @@ namespace SGAPS.Runtime.Data
             MaxStateDim = 64;
             TargetFPS = 10;
             Resolution = new Vector2Int(640, 480);
+            DebugMode = false;
         }
 
         /// <summary>
@@ -69,7 +76,8 @@ namespace SGAPS.Runtime.Data
             int sampleCount,
             int maxStateDim,
             int targetFPS,
-            Vector2Int resolution)
+            Vector2Int resolution,
+            bool debugMode = false)
         {
             CheckpointKey = checkpointKey ?? "default";
             CheckpointLoaded = checkpointLoaded;
@@ -78,6 +86,7 @@ namespace SGAPS.Runtime.Data
             MaxStateDim = maxStateDim;
             TargetFPS = targetFPS;
             Resolution = resolution;
+            DebugMode = debugMode;
         }
 
         public override string ToString()

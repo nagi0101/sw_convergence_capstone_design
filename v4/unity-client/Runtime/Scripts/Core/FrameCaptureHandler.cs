@@ -12,10 +12,12 @@ namespace SGAPS.Runtime.Core
     {
         private RenderTexture screenRT;
         private RenderTexture grayscaleRT;
+        private RenderTexture debugRT; // For downsampled debug frame
         private Material grayscaleMaterial;
 
         private bool isDisposed = false;
         private Vector2Int lastScreenSize;
+        private readonly Vector2Int debugTextureSize = new Vector2Int(112, 112);
 
         /// <summary>
         /// Gets the current grayscale RenderTexture after capture.
@@ -26,6 +28,11 @@ namespace SGAPS.Runtime.Core
         /// Current screen resolution.
         /// </summary>
         public Vector2Int ScreenResolution => new Vector2Int(Screen.width, Screen.height);
+
+        /// <summary>
+        /// The resolution of the downsampled debug texture.
+        /// </summary>
+        public Vector2Int DebugTextureResolution => debugTextureSize;
 
         /// <summary>
         /// Creates a new FrameCaptureHandler for final screen capture.
@@ -54,6 +61,14 @@ namespace SGAPS.Runtime.Core
                     UnityEngine.Object.Destroy(grayscaleRT);
                     grayscaleRT = null;
                 }
+
+                // Debug RT does not depend on screen size, but we can recreate it here for cleanliness
+                if (debugRT != null)
+                {
+                    debugRT.Release();
+                    UnityEngine.Object.Destroy(debugRT);
+                    debugRT = null;
+                }
             }
 
             if (screenRT == null)
@@ -69,13 +84,21 @@ namespace SGAPS.Runtime.Core
                 grayscaleRT = new RenderTexture(width, height, 0, RenderTextureFormat.R8)
                 {
                     name = "SGAPS_GrayscaleRT",
-                    filterMode = FilterMode.Point,
+                    filterMode = FilterMode.Bilinear, // Bilinear is better for downsampling
                     wrapMode = TextureWrapMode.Clamp
                 };
                 grayscaleRT.Create();
 
+                debugRT = new RenderTexture(debugTextureSize.x, debugTextureSize.y, 0, RenderTextureFormat.R8)
+                {
+                    name = "SGAPS_DebugRT",
+                    filterMode = FilterMode.Bilinear,
+                    wrapMode = TextureWrapMode.Clamp
+                };
+                debugRT.Create();
+
                 lastScreenSize = new Vector2Int(width, height);
-                Debug.Log($"[SGAPS.FrameCaptureHandler] Created RenderTextures at {width}x{height}");
+                Debug.Log($"[SGAPS.FrameCaptureHandler] Created RenderTextures. Screen: {width}x{height}, Debug: {debugTextureSize.x}x{debugTextureSize.y}");
             }
         }
 
@@ -96,11 +119,8 @@ namespace SGAPS.Runtime.Core
         }
 
         /// <summary>
-        /// Captures the final rendered screen to a grayscale RenderTexture.
-        /// MUST be called after WaitForEndOfFrame in a coroutine.
-        /// Includes UI, post-processing, and all camera compositing.
+        /// Captures the final rendered screen to a full-resolution grayscale RenderTexture.
         /// </summary>
-        /// <returns>The grayscale RenderTexture of the captured screen</returns>
         public RenderTexture CaptureScreen()
         {
             if (isDisposed)
@@ -110,13 +130,25 @@ namespace SGAPS.Runtime.Core
 
             EnsureRenderTextures();
 
-            // Capture final screen (UI, post-processing, everything)
             ScreenCapture.CaptureScreenshotIntoRenderTexture(screenRT);
-
-            // Convert to grayscale
             Graphics.Blit(screenRT, grayscaleRT, grayscaleMaterial);
 
             return grayscaleRT;
+        }
+
+        /// <summary>
+        /// Captures and downsamples the screen for efficient debug frame transmission.
+        /// </summary>
+        /// <returns>A low-resolution grayscale RenderTexture of the captured screen.</returns>
+        public RenderTexture CaptureDebugFrameTexture()
+        {
+            // First, get the full-res grayscale capture
+            CaptureScreen();
+
+            // Now, downsample it to the debug texture
+            Graphics.Blit(grayscaleRT, debugRT);
+
+            return debugRT;
         }
 
         /// <summary>
@@ -139,6 +171,13 @@ namespace SGAPS.Runtime.Core
                 grayscaleRT.Release();
                 UnityEngine.Object.Destroy(grayscaleRT);
                 grayscaleRT = null;
+            }
+
+            if (debugRT != null)
+            {
+                debugRT.Release();
+                UnityEngine.Object.Destroy(debugRT);
+                debugRT = null;
             }
 
             if (grayscaleMaterial != null)

@@ -2,7 +2,8 @@
 
 defaults:
     - server: development
-    - sampling: adaptive      # Phase 3: Use adaptive importance-based sampling
+    - sampling: adaptive # Phase 3: Use adaptive importance-based sampling
+    - debug: enabled # Debug visualization system
     - mask_update: fixed
     - training: phase1
     - data: base

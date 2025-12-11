@@ -131,10 +131,10 @@ def compute_all_metrics(
 def format_metrics(metrics: Dict[str, float]) -> str:
     """
     Format metrics for display.
-    
+
     Args:
         metrics: Dictionary of metric values
-        
+
     Returns:
         Formatted string
     """
@@ -143,3 +143,19 @@ def format_metrics(metrics: Dict[str, float]) -> str:
         f"PSNR: {metrics.get('psnr', 0):.2f} dB, "
         f"SSIM: {metrics.get('ssim', 0):.4f}"
     )
+
+
+# Convenience aliases for debug visualization
+def calculate_psnr(img1: np.ndarray, img2: np.ndarray) -> float:
+    """Calculate PSNR. Alias for compute_psnr."""
+    return compute_psnr(img1, img2)
+
+
+def calculate_ssim(img1: np.ndarray, img2: np.ndarray) -> float:
+    """Calculate SSIM. Alias for compute_ssim."""
+    return compute_ssim(img1, img2)
+
+
+def calculate_mse(img1: np.ndarray, img2: np.ndarray) -> float:
+    """Calculate MSE. Alias for compute_mse."""
+    return compute_mse(img1, img2)

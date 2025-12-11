@@ -1,19 +1,19 @@
 # Phase 1: 기본 통신 및 학습 파이프라인 검증용 설정
-num_epochs: 50
+num_epochs: 500
 batch_size: 8
 num_workers: 4 # 시스템 환경에 맞게 조절하세요. 0으로 설정하면 메인 프로세스에서 데이터를 로드합니다.
 
 # Optimizer
 optimizer:
-  type: adamw
-  learning_rate: 1.0e-4
-  weight_decay: 0.01
-  betas: [0.9, 0.999]
+    type: adamw
+    learning_rate: 1.0e-4
+    weight_decay: 0.01
+    betas: [0.9, 0.999]
 
 # Scheduler
 scheduler:
-  type: cosine_annealing
-  eta_min: 1.0e-6
+    type: cosine_annealing
+    eta_min: 1.0e-6
 
 # Gradient Clipping
 gradient_clip_norm: 1.0
@@ -23,8 +23,8 @@ use_amp: true
 
 # Checkpoint
 checkpoint:
-  save_interval: 1 # 매 에포크마다 검증 및 저장
-  metric: "val_loss" # 검증 손실을 기준으로 모델 저장
-  mode: "min" # 낮을수록 좋음
-  checkpoint_key: ???  # Must be provided via command line, e.g., training.checkpoint.checkpoint_key=my-model
-  keep_all_epochs: false  # Only keep best model
+    save_interval: 1 # 매 에포크마다 검증 및 저장
+    metric: "val_loss" # 검증 손실을 기준으로 모델 저장
+    mode: "min" # 낮을수록 좋음
+    checkpoint_key: ??? # Must be provided via command line, e.g., training.checkpoint.checkpoint_key=my-model
+    keep_all_epochs: false # Only keep best model

@@ -31,6 +31,11 @@ namespace SGAPS.Runtime.Core
         [SerializeField]
         private bool showDebugPanel = false;
 
+        [Header("Debug")]
+        [Tooltip("Enable debug mode (sends full frames for visualization when server debug is also enabled)")]
+        [SerializeField]
+        private bool debugMode = false;
+
         #endregion
 
         #region Runtime Fields (set by server)
@@ -39,6 +44,7 @@ namespace SGAPS.Runtime.Core
         private int sampleCount = 500;
         private int maxStateDim = 64;
         private int targetFPS = 10;
+        private bool serverDebugEnabled = false; // Set from session_start_ack
 
         // Sentinel value is server-internal for state vector padding
         // Client uses a constant default for uninitialized state (if needed locally)
@@ -201,8 +207,8 @@ namespace SGAPS.Runtime.Core
 
             if (success)
             {
-                // Send session start - server will respond with sample_count and max_state_dim
-                networkClient.SendSessionStart();
+                // Send session start with debug mode request
+                networkClient.SendSessionStart(debugMode);
                 // Note: Capturing will start after receiving session_start_ack
             }
             else
@@ -292,14 +298,13 @@ namespace SGAPS.Runtime.Core
 
             try
             {
-                // CaptureScreen() uses ScreenCapture API - captures final rendered screen
+                // Always capture the full screen for pixel sampling
                 RenderTexture grayscaleRT = frameCaptureHandler.CaptureScreen();
 
                 PixelData[] sampledPixels = pixelSampler.SamplePixelsFast(grayscaleRT, currentUVCoordinates);
 
                 float[] stateVector = stateVectorCollector.GetUsedStates();
 
-                // Use current screen resolution
                 Vector2Int screenRes = frameCaptureHandler.ScreenResolution;
 
                 var frameData = new FrameDataMessage
@@ -311,7 +316,18 @@ namespace SGAPS.Runtime.Core
                     StateVector = stateVector
                 };
 
-                networkClient.SendFrameData(frameData);
+                // Send debug frame if both client and server debug modes are enabled
+                if (debugMode && serverDebugEnabled)
+                {
+                    // Get the small, pre-downsampled debug texture
+                    RenderTexture debugRT = frameCaptureHandler.CaptureDebugFrameTexture();
+                    string fullFrameBase64 = EncodeTextureAsJPG(debugRT); // Encode the small texture
+                    networkClient.SendDebugFrameData(frameData, fullFrameBase64);
+                }
+                else
+                {
+                    networkClient.SendFrameData(frameData);
+                }
 
                 frameCounter++;
 
@@ -325,6 +341,38 @@ namespace SGAPS.Runtime.Core
             catch (Exception ex)
             {
                 Debug.LogError($"[SGAPS] Error during frame capture: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Captures a RenderTexture as JPG and encodes to Base64.
+        /// Optimized for speed and size for debug purposes.
+        /// </summary>
+        private string EncodeTextureAsJPG(RenderTexture rt)
+        {
+            try
+            {
+                // Create temporary texture to read pixels from the render texture
+                Texture2D tex = new Texture2D(rt.width, rt.height, TextureFormat.R8, false);
+
+                RenderTexture.active = rt;
+                tex.ReadPixels(new Rect(0, 0, rt.width, rt.height), 0, 0);
+                tex.Apply();
+                RenderTexture.active = null;
+
+                // Encode to JPG for smaller size and faster encoding
+                byte[] jpgBytes = tex.EncodeToJPG(75); // 75% quality is a good balance
+
+                // Clean up
+                UnityEngine.Object.Destroy(tex);
+
+                // Convert to Base64
+                return System.Convert.ToBase64String(jpgBytes);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[SGAPS] Error encoding texture as JPG: {ex.Message}");
+                return string.Empty;
             }
         }
 
@@ -355,7 +403,18 @@ namespace SGAPS.Runtime.Core
             sampleCount = config.SampleCount;
             maxStateDim = config.MaxStateDim;
             targetFPS = config.TargetFPS;
+            serverDebugEnabled = config.DebugMode;
             // Note: sentinel_value is server-internal for padding, not sent to client
+
+            // Log debug mode status
+            if (debugMode && serverDebugEnabled)
+            {
+                Debug.Log("[SGAPS] Debug mode enabled on both client and server - will send full frames for visualization");
+            }
+            else if (debugMode && !serverDebugEnabled)
+            {
+                Debug.LogWarning("[SGAPS] Client debug mode enabled but server debug mode is disabled - will only send sparse pixels");
+            }
 
             // Initialize components with server-provided values
             pixelSampler = new PixelSampler(sampleCount);
@@ -365,7 +424,7 @@ namespace SGAPS.Runtime.Core
             stateVectorCollector = new StateVectorCollector(maxStateDim);
 
             Debug.Log($"[SGAPS] Initialized with sampleCount={sampleCount}, maxStateDim={maxStateDim}, " +
-                      $"targetFPS={targetFPS}");
+                      $"targetFPS={targetFPS}, debugMode={serverDebugEnabled}");
 
             // Now we can start capturing
             StartCapturing();

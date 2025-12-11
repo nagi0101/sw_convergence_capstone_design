@@ -1,0 +1,38 @@
+enabled: true
+
+# Visualization settings - Matplotlib-based dashboard
+visualization:
+    # Log every N frames (1 = every frame, 10 = every 10th frame)
+    log_every_n_frames: 10
+
+    # Matplotlib figure settings - balanced for readability and performance
+    figure:
+        figsize: [16, 8]   # inches (width, height) - results in ~1600x800px
+        dpi: 100           # Reduced for faster rendering
+        style: "dark_background"  # Matplotlib style
+    
+    # Layout: 2 rows, 4 columns
+    layout:
+        rows: 2
+        cols: 4
+    
+    # Colormap for heatmaps (viridis, plasma, inferno, magma, jet, hot)
+    colormap: "viridis"
+    
+    # Font sizes
+    font:
+        suptitle: 16
+        title: 14
+        label: 11
+        tick: 9
+
+# Storage settings
+storage:
+    save_to_disk: false
+    output_dir: "./debug_output"
+
+# Logging settings
+wandb:
+    log_composite: true
+    log_individual: false # Also log individual components separately
+    log_metrics: true # Log numerical metrics (PSNR, SSIM, MSE)
