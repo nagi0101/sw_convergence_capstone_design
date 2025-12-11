@@ -141,31 +141,73 @@ namespace SGAPS.Runtime.Core
         /// </summary>
         public void Disconnect()
         {
+            ForceDisconnect(graceful: true);
+        }
+
+        /// <summary>
+        /// Force disconnects from the server, ensuring all resources are released.
+        /// This is called during Unity Editor play mode exit to ensure cleanup.
+        /// </summary>
+        /// <param name="graceful">If true, attempts graceful close first. If false, aborts immediately.</param>
+        public void ForceDisconnect(bool graceful = false)
+        {
             if (isDisposed) return;
 
             try
             {
+                // Cancel all async operations first
+                cancellationTokenSource?.Cancel();
+
                 lock (lockObject)
                 {
-                    cancellationTokenSource?.Cancel();
-
-                    if (webSocket != null && webSocket.State == WebSocketState.Open)
+                    if (webSocket != null)
                     {
-                        var closeTask = webSocket.CloseAsync(
-                            WebSocketCloseStatus.NormalClosure,
-                            "Client disconnecting",
-                            CancellationToken.None
-                        );
-
-                        if (!closeTask.Wait(TimeSpan.FromSeconds(2)))
+                        if (graceful && webSocket.State == WebSocketState.Open)
                         {
-                            Debug.LogWarning("[SGAPS.NetworkClient] Close timeout, aborting.");
+                            try
+                            {
+                                var closeTask = webSocket.CloseAsync(
+                                    WebSocketCloseStatus.NormalClosure,
+                                    "Client disconnecting",
+                                    CancellationToken.None
+                                );
+
+                                if (!closeTask.Wait(TimeSpan.FromSeconds(1)))
+                                {
+                                    Debug.LogWarning("[SGAPS.NetworkClient] Close timeout, aborting.");
+                                    webSocket.Abort();
+                                }
+                            }
+                            catch
+                            {
+                                // If graceful close fails, abort
+                                webSocket.Abort();
+                            }
+                        }
+                        else
+                        {
+                            // Force abort if not graceful or not in Open state
                             webSocket.Abort();
                         }
+
+                        webSocket.Dispose();
+                        webSocket = null;
                     }
 
-                    webSocket?.Dispose();
-                    webSocket = null;
+                    // Wait for receive loop to finish
+                    if (receiveLoopTask != null && !receiveLoopTask.IsCompleted)
+                    {
+                        try
+                        {
+                            receiveLoopTask.Wait(TimeSpan.FromMilliseconds(500));
+                        }
+                        catch
+                        {
+                            // Ignore any exceptions from the receive loop
+                        }
+                        receiveLoopTask = null;
+                    }
+
                     cancellationTokenSource?.Dispose();
                     cancellationTokenSource = null;
                 }

@@ -457,6 +457,10 @@ namespace SGAPS.Runtime.Core
                 networkClient.OnSessionStarted -= HandleSessionStarted;
                 networkClient.OnUVCoordinatesReceived -= HandleUVCoordinatesReceived;
                 networkClient.OnError -= HandleError;
+                
+                // Force disconnect without graceful close to ensure immediate cleanup
+                // This is important for Unity Editor play mode exit
+                networkClient.ForceDisconnect(graceful: false);
                 networkClient.Dispose();
                 networkClient = null;
             }
