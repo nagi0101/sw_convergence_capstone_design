@@ -8,6 +8,7 @@ defaults:
     - training: phase1
     - data: base
     - logging: wandb
+    - skip: enabled # Skip connection configuration (default: enabled)
     - _self_
 
 # --- Paths ---
@@ -57,6 +58,9 @@ model:
         num_decoder_layers: 4 # Cross-Attention Decoder layers
         feedforward_dim: 1024 # FFN 중간 차원
         dropout: 0.1
+        
+        # Skip connection settings (managed via conf/skip/*.yaml)
+        skip: ${skip}
 
     # Positional encoding settings (spt.py:69 requires this)
     positional_encoding:

@@ -1,0 +1,7 @@
+# Skip Connection: ENABLED (Default)
+# Use this for training with skip connections
+
+enabled: true
+type: "encoder_decoder" # Options: encoder_decoder, multi_scale, input_output
+dropout: 0.2 # Dropout for skip projection layer
+weight: 1.0 # Skip connection weight (alpha)

@@ -1,0 +1,7 @@
+# Skip Connection: DISABLED
+# Use this for baseline comparison experiments
+
+enabled: false
+type: "encoder_decoder"
+dropout: 0.2
+weight: 1.0

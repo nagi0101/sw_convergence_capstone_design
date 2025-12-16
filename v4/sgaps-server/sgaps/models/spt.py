@@ -111,6 +111,10 @@ class SparsePixelTransformer(nn.Module):
         self.num_decoder_layers = config.model.architecture.num_decoder_layers
         self.max_state_dim = config.model.input_constraints.max_state_dim
         self.sentinel_value = config.model.sentinel_value
+        
+        # Skip connection settings
+        self.skip_enabled = config.model.architecture.skip.enabled
+        self.skip_weight = config.model.architecture.skip.weight
 
         # 1. Pixel Embedding: (u, v, value) -> embed_dim
         self.pixel_embed = nn.Linear(3, self.embed_dim)
@@ -149,7 +153,15 @@ class SparsePixelTransformer(nn.Module):
             batch_first=True
         )
         
-        # 6. Cross-Attention Decoder (Memory Efficient)
+        # 6. Skip Connection Projection (Option A: Encoder-Decoder Skip)
+        if self.skip_enabled:
+            self.skip_proj = nn.Sequential(
+                nn.Linear(self.embed_dim, self.embed_dim),
+                nn.Dropout(config.model.architecture.skip.dropout),
+                nn.LayerNorm(self.embed_dim)
+            )
+        
+        # 7. Cross-Attention Decoder (Memory Efficient)
         decoder_layers = [
             CrossAttentionDecoderLayer(
                 d_model=self.embed_dim,
@@ -161,7 +173,7 @@ class SparsePixelTransformer(nn.Module):
         ]
         self.decoder = nn.ModuleList(decoder_layers)
 
-        # 7. CNN Refinement Head
+        # 8. CNN Refinement Head
         refinement_channels = [self.embed_dim] + config.model.refinement_head.channels + [1]
         refinement_layers = []
         for i in range(len(refinement_channels) - 2):
@@ -245,15 +257,21 @@ class SparsePixelTransformer(nn.Module):
 
         # 6. Broadcast state information to all pixels
         encoded = encoded + state_conditioned.expand(-1, N, -1)
+        
+        # 7. Prepare skip connection: average encoder output across pixels
+        if self.skip_enabled:
+            # Average pooling over sparse pixels: [B, N, embed_dim] -> [B, 1, embed_dim]
+            encoded_avg = encoded.mean(dim=1, keepdim=True)  # Global context from encoder
+            encoded_avg_proj = self.skip_proj(encoded_avg)  # Project for skip
 
-        # 7. Generate query grid for full frame: [B, H*W, 2]
+        # 8. Generate query grid for full frame: [B, H*W, 2]
         query_positions = self._generate_query_grid(B, H, W, device)
 
-        # 8. Create query embeddings with only positional information
+        # 9. Create query embeddings with only positional information
         query_embeds = torch.zeros(B, H*W, self.embed_dim, device=device)
         query_embeds = self.pos_encoder(query_embeds, query_positions)
 
-        # 9. Decoder: cross-attention between queries and encoded sparse pixels
+        # 10. Decoder: cross-attention between queries and encoded sparse pixels
         decoded = query_embeds
         all_attn_weights = []
 
@@ -267,6 +285,10 @@ class SparsePixelTransformer(nn.Module):
                 all_attn_weights.append(layer_attn)  # [B, num_heads, H*W, N]
             else:
                 decoded = layer(tgt=decoded, memory=encoded)
+            
+            # Skip connection: Add encoder global context to decoder output
+            if self.skip_enabled:
+                decoded = decoded + self.skip_weight * encoded_avg_proj.expand(-1, decoded.shape[1], -1)
         # Output: [B, H*W, embed_dim]
 
         # 10. Reshape to 2D spatial format
