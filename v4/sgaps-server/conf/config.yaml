@@ -9,6 +9,7 @@ defaults:
     - data: base
     - logging: wandb
     - skip: enabled # Skip connection configuration (default: enabled)
+    - pe: gaussian # Positional encoding configuration (default: gaussian fourier)
     - _self_
 
 # --- Paths ---
@@ -62,10 +63,8 @@ model:
         # Skip connection settings (managed via conf/skip/*.yaml)
         skip: ${skip}
 
-    # Positional encoding settings (spt.py:69 requires this)
-    positional_encoding:
-        max_freq: 10
-        num_bands: 64 # embed_dim // 4
+    # Positional encoding settings (managed via conf/pe/*.yaml)
+    positional_encoding: ${pe}
 
     # CNN Refinement Head
     refinement_head:

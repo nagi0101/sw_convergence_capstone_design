@@ -1,0 +1,4 @@
+# Sinusoidal positional encoding (DETR-style)
+# Original implementation, fixed frequencies
+type: sinusoidal
+max_freq: 10      # Maximum frequency for sinusoidal functions

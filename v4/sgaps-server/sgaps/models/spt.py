@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 from omegaconf import DictConfig
 
-from .positional_encoding import ContinuousPositionalEncoding
+from .positional_encoding import create_positional_encoding
 
 class StateVectorEncoder(nn.Module):
     """
@@ -126,10 +126,14 @@ class SparsePixelTransformer(nn.Module):
             sentinel_value=self.sentinel_value
         )
 
-        # 3. Positional Encoding
-        self.pos_encoder = ContinuousPositionalEncoding(
+        # 3. Positional Encoding (configurable via Hydra)
+        pe_config = config.model.positional_encoding
+        self.pos_encoder = create_positional_encoding(
             embed_dim=self.embed_dim,
-            max_freq=config.model.positional_encoding.max_freq
+            pe_type=pe_config.type,
+            max_freq=pe_config.get('max_freq', 10),
+            sigma=pe_config.get('sigma', 10.0),
+            learnable=pe_config.get('learnable', True)
         )
 
         # 4. Sparse Transformer Encoder
