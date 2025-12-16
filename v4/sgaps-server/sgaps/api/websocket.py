@@ -153,10 +153,8 @@ async def process_debug_visualizations(session: Session):
     loop = asyncio.get_running_loop()
     
     for i, data in enumerate(session.debug_buffer):
-        # Get monotonic global step for WandB
-        async with manager._lock:
-            global_step = manager.global_wandb_step
-            manager.global_wandb_step += 1
+        # Use pre-allocated step from buffer time (ensures monotonically increasing order)
+        global_step = data.get('global_step', i)  # Fallback to index if not present
         
         try:
             # Run matplotlib visualization in thread pool to avoid blocking event loop
@@ -373,16 +371,15 @@ async def handle_frame_data(client_id: str, payload: dict):
         except Exception as e:
             logger.error(f"Error calculating importance map: {e}. Using static sampling.")
 
-    # 4. Log to WandB (if enabled)
+    # 4. Log to WandB (if enabled) - organized by client_id folder
     if USE_WANDB and wandb.run:
         log_payload = {
-            "Session/Frame_ID": frame_id,
-            "Session/Client_ID": client_id,
+            f"Session/{client_id}/Frame_ID": frame_id,
         }
         if reconstructed_frame is not None:
              # Only log reconstruction for non-debug sessions here
             if not session.debug_enabled:
-                 log_payload["Live/Reconstruction"] = wandb.Image(Image.fromarray(reconstructed_frame))
+                 log_payload[f"Live/{client_id}/Reconstruction"] = wandb.Image(Image.fromarray(reconstructed_frame))
         
         wandb.log(log_payload, step=global_step)
 
@@ -448,6 +445,12 @@ async def handle_frame_data_debug(client_id: str, payload: dict):
     should_buffer_visualization = (current_frame_count % log_every_n == 0)
 
     if should_buffer_visualization:
+        # Pre-allocate global step for WandB at buffer time (not at log time)
+        # This ensures monotonically increasing steps
+        async with manager._lock:
+            global_step = manager.global_wandb_step
+            manager.global_wandb_step += 1
+        
         original_frame = None
         full_frame_base64 = payload.get("full_frame_base64", None)
         if full_frame_base64:
@@ -481,6 +484,7 @@ async def handle_frame_data_debug(client_id: str, payload: dict):
                     importance_map_np = importance_map
             
             session.debug_buffer.append({
+                "global_step": global_step,  # Pre-allocated step for WandB logging
                 "original_frame": original_frame,
                 "reconstructed_frame": reconstructed_frame,
                 "sampled_pixels": pixels,

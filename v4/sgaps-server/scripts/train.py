@@ -93,11 +93,12 @@ def main(cfg: DictConfig) -> None:
     # 4. Initialize Datasets and DataLoaders
     print("Initializing datasets...")
     
-    # Find all HDF5 files in the data_root directory
-    all_h5_files = list(Path(cfg.data.data_root).glob("**/*.h5"))
+    # Find all HDF5 files in the configured checkpoint_path directory
+    checkpoint_path = cfg.training.checkpoint.checkpoint_path
+    all_h5_files = list(Path(checkpoint_path).glob("**/*.h5"))
     
     if not all_h5_files:
-        raise FileNotFoundError(f"No HDF5 data found in {cfg.data.data_root}. Please ensure HDF5 files are present.")
+        raise FileNotFoundError(f"No HDF5 data found in {checkpoint_path}. Please ensure HDF5 files are present.")
     
     print(f"Found {len(all_h5_files)} HDF5 files.")
 

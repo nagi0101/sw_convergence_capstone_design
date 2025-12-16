@@ -1,5 +1,5 @@
 # Phase 1: 기본 통신 및 학습 파이프라인 검증용 설정
-num_epochs: 500
+num_epochs: 100
 batch_size: 8
 num_workers: 4 # 시스템 환경에 맞게 조절하세요. 0으로 설정하면 메인 프로세스에서 데이터를 로드합니다.
 
@@ -27,4 +27,5 @@ checkpoint:
     metric: "val_loss" # 검증 손실을 기준으로 모델 저장
     mode: "min" # 낮을수록 좋음
     checkpoint_key: ??? # Must be provided via command line, e.g., training.checkpoint.checkpoint_key=my-model
+    checkpoint_path: ${paths.data_root} # 데이터(.h5 파일)를 탐색할 경로 (기본값: ./data)
     keep_all_epochs: false # Only keep best model
