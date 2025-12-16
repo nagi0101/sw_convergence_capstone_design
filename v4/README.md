@@ -134,77 +134,83 @@ flowchart LR
 ```mermaid
 graph TB
     subgraph Input["입력"]
-        PixelValues["픽셀 값<br/>[N, 1] Grayscale"]
-        PixelPositions["픽셀 위치<br/>[N, 2] (u,v)"]
+        PixelValues["픽셀 값<br/>[N, 3] (u,v,value)"]
         StateVector["상태 벡터<br/>[max_state_dim]"]
+        StateMask["상태 마스크<br/>[max_state_dim]"]
     end
 
-    subgraph Embedding["임베딩 (configurable)"]
-        PixelEmbed["Pixel Embedding<br/>Linear(1, embed_dim)"]
-        PosEnc["Continuous Position<br/>Encoding(embed_dim)"]
-        StateEnc["State Vector Encoder<br/>MLP → embed_dim"]
+    subgraph Embedding["임베딩"]
+        PixelEmbed["Pixel Embedding<br/>Linear(3, embed_dim)"]
+        PosEnc["Continuous Positional<br/>Encoding"]
+        StateEnc["StateVectorEncoder<br/>(masked)"]
         PixelWithPos["Pixel + Position<br/>[N, embed_dim]"]
+        StateEmbeds["State Embeds<br/>[1, embed_dim]"]
     end
 
     subgraph TransformerEncoder["Sparse Transformer Encoder"]
-        SelfAttn1["Self-Attention Layer 1<br/>embed_dim, num_heads"]
-        SelfAttn2["Self-Attention Layer 2"]
-        SelfAttnN["...<br/>num_encoder_layers"]
-        SparseFeatures["Sparse Features<br/>[N, embed_dim]"]
+        SelfAttn["Self-Attention Layers<br/>(num_encoder_layers)"]
+        Encoded["Encoded Features<br/>[N, embed_dim]"]
+    end
+
+    subgraph StateFusion["State-Pixel Fusion"]
+        StatePixelAttn["State-Pixel Cross-Attention<br/>Q: State, K/V: Encoded"]
+        Broadcast["Broadcast State Info<br/>to All Pixels"]
+        EncodedWithState["State-Conditioned<br/>Features [N, embed_dim]"]
+    end
+
+    subgraph SkipConnection["Skip Connection (Optional)"]
+        SkipProj["Skip Projection<br/>Linear + Dropout + LayerNorm"]
+        EncodedAvg["Global Context<br/>[1, embed_dim]"]
     end
 
     subgraph CrossAttentionDecoder["Cross-Attention Decoder"]
-        QueryGrid["Query Grid 생성<br/>[H×W, 2] 전체 픽셀 좌표"]
-        QueryEmbed["Query Embedding<br/>[H×W, embed_dim]"]
-        CrossAttn1["Cross-Attention Layer 1<br/>Query: Grid, K/V: Sparse"]
-        CrossAttn2["Cross-Attention Layer 2"]
-        CrossAttnN["...<br/>num_decoder_layers"]
-        StatePixelAttn["State-Pixel<br/>Cross-Attention"]
-        DenseFeatures["Dense Features<br/>[H×W, embed_dim]"]
+        QueryGrid["Query Grid<br/>[H×W, 2] UV coords"]
+        QueryEmbed["Query Pos Encoding<br/>[H×W, embed_dim]"]
+        DecoderLayers["CrossAttentionDecoderLayer × 4<br/>(no self-attention)"]
+        SkipAdd["+ Skip Connection<br/>(if enabled)"]
+        Decoded["Decoded<br/>[H×W, embed_dim]"]
     end
 
     subgraph CNNHead["CNN Refinement Head"]
         Reshape["Reshape<br/>[H, W, embed_dim]"]
-        Conv1["Conv2d(embed_dim, 128)"]
-        Conv2["Conv2d(128, 64)"]
-        Conv3["Conv2d(64, 1)"]
-        Sigmoid["Sigmoid()"]
-    end
-
-    subgraph Output["출력"]
-        ReconstructedFrame["복원된 프레임<br/>[H, W, 1] Grayscale"]
+        Conv["Conv Layers<br/>(configurable)"]
+        Output["Output<br/>[H, W, 1]"]
     end
 
     PixelValues --> PixelEmbed
-    PixelPositions --> PosEnc
-    PixelEmbed --> PixelWithPos
+    PixelEmbed --> PosEnc
     PosEnc --> PixelWithPos
     StateVector --> StateEnc
+    StateMask --> StateEnc
+    StateEnc --> StateEmbeds
 
-    PixelWithPos --> SelfAttn1
-    SelfAttn1 --> SelfAttn2
-    SelfAttn2 --> SelfAttnN
-    SelfAttnN --> SparseFeatures
+    PixelWithPos --> SelfAttn
+    SelfAttn --> Encoded
 
-    PixelPositions --> QueryGrid
+    StateEmbeds --> StatePixelAttn
+    Encoded --> StatePixelAttn
+    StatePixelAttn --> Broadcast
+    Encoded --> Broadcast
+    Broadcast --> EncodedWithState
+
+    EncodedWithState --> EncodedAvg
+    EncodedAvg --> SkipProj
+
     QueryGrid --> QueryEmbed
-    QueryEmbed --> CrossAttn1
-    SparseFeatures --> CrossAttn1
-    CrossAttn1 --> CrossAttn2
-    CrossAttn2 --> CrossAttnN
-    CrossAttnN --> StatePixelAttn
-    StateEnc --> StatePixelAttn
-    StatePixelAttn --> DenseFeatures
+    QueryEmbed --> DecoderLayers
+    EncodedWithState --> DecoderLayers
+    DecoderLayers --> SkipAdd
+    SkipProj --> SkipAdd
+    SkipAdd --> Decoded
 
-    DenseFeatures --> Reshape
-    Reshape --> Conv1
-    Conv1 --> Conv2
-    Conv2 --> Conv3
-    Conv3 --> Sigmoid
-    Sigmoid --> ReconstructedFrame
+    Decoded --> Reshape
+    Reshape --> Conv
+    Conv --> Output
 
     style Input fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
     style TransformerEncoder fill:#f3e5f5,stroke:#4a148c,stroke-width:2px
+    style StateFusion fill:#fff9c4,stroke:#f57f17,stroke-width:2px
+    style SkipConnection fill:#e1bee7,stroke:#6a1b9a,stroke-width:2px,stroke-dasharray: 5 5
     style CrossAttentionDecoder fill:#fff3e0,stroke:#ef6c00,stroke-width:2px
     style CNNHead fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
 ```
