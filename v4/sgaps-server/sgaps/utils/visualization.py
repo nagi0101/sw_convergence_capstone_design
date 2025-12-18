@@ -19,7 +19,7 @@ from matplotlib.colors import Normalize
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from PIL import Image
 from io import BytesIO
-from typing import Dict, Optional
+from typing import Dict, Optional, Any
 import logging
 import threading
 
@@ -217,8 +217,8 @@ class DebugVisualizer:
         ax.axis('off')
         self._add_colorbar(ax, im)
 
-    def _plot_attention(self, ax, attention_weights: Optional[torch.Tensor], cmap: str):
-        """Plot attention weights visualization."""
+    def _plot_attention(self, ax, attention_weights: Optional[Any], cmap: str):
+        """Plot attention weights visualization (supports Tensor or Numpy)."""
         if attention_weights is None:
             ax.text(0.5, 0.5, "No Attention Data", ha='center', va='center',
                     transform=ax.transAxes, fontsize=14, color='gray')
@@ -228,8 +228,60 @@ class DebugVisualizer:
             return
 
         try:
-            # Average attention across last dimension
-            attn_mean = attention_weights[0].mean(dim=-1).cpu().numpy()
+            # Convert to numpy if tensor
+            if isinstance(attention_weights, torch.Tensor):
+                attn_data = attention_weights.detach().cpu().numpy()
+            elif isinstance(attention_weights, (list, tuple)):
+                # Handle list of heads/layers - assume we want the last one
+                last_item = attention_weights[-1]
+                if isinstance(last_item, torch.Tensor):
+                    attn_data = last_item.detach().cpu().numpy()
+                else:
+                    attn_data = np.array(last_item)
+            else:
+                attn_data = np.array(attention_weights)
+
+            # Expected shape: [batch, num_heads, seq_len, seq_len] or similar
+            # Or [1, tokens, tokens]
+            # Squeeze batch dim if present
+            if attn_data.ndim == 4:
+                attn_data = attn_data[0] # [heads, S, S]
+            
+            # Average across heads/layers usually
+            # Here implementation relies on mean(dim=-1). Let's see original code intent.
+            # Original: attention_weights[0].mean(dim=-1)
+            # Implies input was [batch, S, S] or similar?
+            # If shape is [heads, S, S], mean(axis=0) gives [S, S].
+            
+            # Let's target getting a 1D importance score per token for visualization, 
+            # Or a 2D attention map? 
+            # The original code: `attn_mean = attention_weights[0].mean(dim=-1)`
+            # Then `H = W = int(num_elements ** 0.5)`
+            # This implies it's visualizing SELF-ATTENTION significance per token, arranged spatially.
+            
+            if attn_data.ndim == 3: # [heads, S, S]
+                 attn_map_2d = np.mean(attn_data, axis=0) # [S, S]
+                 # But we want significance?
+                 # If original code did .mean(dim=-1), it reduces [S, S] -> [S] (average attention received/given?)
+                 
+                 # Let's stick to what worked before, just translated to Numpy
+                 # If input was [1, S, S], then [0] is [S, S]. mean(dim=-1) is [S].
+                 # If input is now numpy [1, S, S]
+                 attn_frame = attn_data
+                 if attn_frame.ndim >= 2:
+                      # Reduce to 1D score vector
+                      attn_scores = np.mean(attn_frame, axis=-1)
+                      # If multiple heads/batch, take mean?
+                      if attn_scores.ndim > 1:
+                           attn_scores = np.mean(attn_scores, axis=0) # Flatten
+                      
+                      attn_mean = attn_scores
+                 else:
+                      attn_mean = attn_frame
+            else:
+                 # Fallback
+                 attn_mean = attn_data.flatten()
+
             num_elements = attn_mean.shape[0]
             H = W = int(num_elements ** 0.5)
             
@@ -245,6 +297,8 @@ class DebugVisualizer:
                 self._add_colorbar(ax, im)
                 ax.set_title("Attention Average", fontweight='bold', pad=8)
             else:
+                # Can't reshape to square, just plot regular plot or error
+                # ax.plot(attn_mean) # Too messy
                 ax.text(0.5, 0.5, f"Non-square: {num_elements}", ha='center', va='center',
                         transform=ax.transAxes, fontsize=12, color='orange')
                 ax.set_title("Attention (Error)", fontweight='bold', pad=8)

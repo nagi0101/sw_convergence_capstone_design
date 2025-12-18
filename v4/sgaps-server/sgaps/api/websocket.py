@@ -438,6 +438,30 @@ async def handle_frame_data_debug(client_id: str, payload: dict):
         except Exception as e:
             logger.error(f"Error calculating importance for debug frame: {e}", exc_info=True)
 
+    # --- Image Decoding & Storage ---
+    original_frame = None
+    full_frame_base64 = payload.get("full_frame_base64", None)
+    if full_frame_base64:
+        try:
+            full_frame_bytes = base64.b64decode(full_frame_base64)
+            pil_image = Image.open(BytesIO(full_frame_bytes))
+            original_frame = np.array(pil_image)
+            original_frame = np.flipud(original_frame)
+        except Exception as e:
+            logger.error(f"Failed to decode full frame: {e}")
+
+    # Store frame data (including image if available) to HDF5
+    if session.storage:
+        asyncio.create_task(
+            session.storage.store_frame(
+                frame_id=frame_id,
+                pixels=payload.get("pixels", []),
+                state_vector=state_vector.tolist(),
+                resolution=session.resolution,
+                image=original_frame
+            )
+        )
+
     # --- Buffering for post-session visualization ---
     current_frame_count = _frame_counter_per_client.get(client_id, 0) + 1
     _frame_counter_per_client[client_id] = current_frame_count
@@ -446,21 +470,11 @@ async def handle_frame_data_debug(client_id: str, payload: dict):
 
     if should_buffer_visualization:
         # Pre-allocate global step for WandB at buffer time (not at log time)
-        # This ensures monotonically increasing steps
         async with manager._lock:
             global_step = manager.global_wandb_step
             manager.global_wandb_step += 1
         
-        original_frame = None
-        full_frame_base64 = payload.get("full_frame_base64", None)
-        if full_frame_base64:
-            try:
-                full_frame_bytes = base64.b64decode(full_frame_base64)
-                pil_image = Image.open(BytesIO(full_frame_bytes))
-                original_frame = np.array(pil_image)
-                original_frame = np.flipud(original_frame)
-            except Exception as e:
-                logger.error(f"Failed to decode full frame for buffering: {e}")
+        # original_frame is already decoded above
 
         if original_frame is not None and reconstructed_frame is not None:
             # Resize original_frame to match reconstructed_frame for metrics
@@ -483,6 +497,17 @@ async def handle_frame_data_debug(client_id: str, payload: dict):
                 else:
                     importance_map_np = importance_map
             
+            # Detach attention weights to CPU/Numpy to prevent GPU OOM
+            attn_weights_np = None
+            if attn_weights is not None:
+                import torch
+                if isinstance(attn_weights, torch.Tensor):
+                    attn_weights_np = attn_weights.detach().cpu().numpy()
+                elif isinstance(attn_weights, (list, tuple)):
+                    attn_weights_np = [t.detach().cpu().numpy() if isinstance(t, torch.Tensor) else t for t in attn_weights]
+                else:
+                    attn_weights_np = attn_weights
+
             session.debug_buffer.append({
                 "global_step": global_step,  # Pre-allocated step for WandB logging
                 "original_frame": original_frame,
@@ -490,7 +515,7 @@ async def handle_frame_data_debug(client_id: str, payload: dict):
                 "sampled_pixels": pixels,
                 "state_vector": state_vector,
                 "importance_map": importance_map_np,
-                "attention_weights": attn_weights,
+                "attention_weights": attn_weights_np,
                 "metadata": {"frame_id": frame_id, "timestamp": payload.get("timestamp", 0.0), "client_id": client_id},
                 "psnr": psnr,
                 "ssim": ssim,

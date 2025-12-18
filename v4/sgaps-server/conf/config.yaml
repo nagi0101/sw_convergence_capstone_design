@@ -2,7 +2,7 @@
 
 defaults:
     - server: development
-    - sampling: adaptive # Phase 3: Use adaptive importance-based sampling
+    - sampling: hybrid # Phase 3: Use adaptive importance-based sampling
     - debug: enabled # Debug visualization system
     - mask_update: fixed
     - training: phase1
@@ -28,7 +28,7 @@ hydra:
 # --- Global settings ---
 max_state_dim: 64
 sentinel_value: -999.0
-target_fps: 10
+target_fps: 5
 seed: 42
 
 # Data storage
