@@ -10,6 +10,7 @@ defaults:
     - logging: wandb
     - skip: enabled # Skip connection configuration (default: enabled)
     - pe: gaussian # Positional encoding configuration (default: gaussian fourier)
+    - cleaning: default # Data cleaning configuration
     - _self_
 
 # --- Paths ---

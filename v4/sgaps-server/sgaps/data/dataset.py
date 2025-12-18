@@ -29,6 +29,52 @@ class SGAPSDataset(Dataset):
         self.frame_indices = []
         self._build_index()
 
+        # Dynamic Data Cleaning (In-Memory)
+        if hasattr(config, 'cleaning') and config.cleaning.enabled:
+            from .cleaner import DataBalancer
+            balancer = DataBalancer(config)
+            
+            # 1. Load all state vectors for clustering
+            print("Loading state vectors for data cleaning...")
+            state_vectors = []
+            pixel_counts = []
+            valid_indices_map = [] # To map back to self.frame_indices
+            
+            for i, (h5_path, session_key, frame_key) in enumerate(self.frame_indices):
+                try:
+                    with h5py.File(h5_path, 'r') as f:
+                        frame_grp = f[session_key]['frames'][frame_key]
+                        
+                        raw_state = frame_grp['state_vector'][:]
+                        # Pad if necessary
+                        sv = np.full(self.max_state_dim, self.sentinel_value, dtype=np.float32)
+                        if len(raw_state) > 0:
+                            sv[:len(raw_state)] = raw_state
+                        
+                        # Get pixel count
+                        sparse_pixels = frame_grp['pixels'][:] if 'pixels' in frame_grp else []
+                        n_pixels = len(sparse_pixels)
+
+                        state_vectors.append(sv)
+                        pixel_counts.append(n_pixels)
+                        valid_indices_map.append(i)
+                except Exception as e:
+                    # Skip broken frames during this check
+                    continue
+            
+            if state_vectors:
+                state_vectors_tensor = torch.tensor(np.array(state_vectors), dtype=torch.float32)
+                pixel_counts_tensor = torch.tensor(np.array(pixel_counts), dtype=torch.float32)
+                
+                # 2. Get indices to keep (these are indices into the list we just created)
+                # Pass pixel counts for enhanced clustering/filtering
+                keep_indices_local = balancer.fit_transform(state_vectors_tensor, pixel_counts_tensor)
+                
+                # 3. Map back to original self.frame_indices
+                new_frame_indices = [self.frame_indices[valid_indices_map[k]] for k in keep_indices_local]
+                self.frame_indices = new_frame_indices
+                print(f"Dataset filtered. {len(self.frame_indices)} frames remaining.")
+
     def _build_index(self):
         """
         Builds an index of all frames across all HDF5 files.

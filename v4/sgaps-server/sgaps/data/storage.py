@@ -106,7 +106,8 @@ class HDF5Storage:
         frame_id: int,
         pixels: List[Dict],
         state_vector: List[float],
-        resolution: Tuple[int, int]
+        resolution: Tuple[int, int],
+        image: Optional[np.ndarray] = None
     ):
         """
         Store a single frame's data.
@@ -116,6 +117,7 @@ class HDF5Storage:
             pixels: List of pixel data dicts
             state_vector: State vector values
             resolution: Frame resolution
+            image: Optional full frame image (H, W, 3)
         """
         if not HAS_H5PY or self.h5file is None:
             return
@@ -142,6 +144,11 @@ class HDF5Storage:
             if state_vector:
                 state_data = np.array(state_vector, dtype=np.float32)
                 frame_group.create_dataset("state_vector", data=state_data)
+                
+            # Store full image if provided (Debug mode)
+            if image is not None:
+                # Store as uint8, compression optional but good for images
+                frame_group.create_dataset("image", data=image, compression="gzip")
             
             # Store resolution
             frame_group.attrs["resolution"] = resolution

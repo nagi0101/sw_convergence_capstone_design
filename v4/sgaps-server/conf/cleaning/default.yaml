@@ -1,0 +1,23 @@
+# Data Cleaning Configuration
+# This controls the dynamic in-memory filtering of the dataset to reduce overfitting
+# caused by repetitive sampling (data imbalance).
+
+enabled: true
+
+# Filter out frames with too few pixels (information poor / outliers)
+filters:
+  min_pixels: 10 # Drop frames with fewer than 10 pixels
+
+clustering:
+  n_clusters: 100        # Number of clusters to represent the state space
+  method: "kmeans"       # "kmeans" (using PyTorch)
+  seed: 42               # Random seed for reproducibility
+  
+  # Feature Engineering
+  include_pixel_count: true # If true, clusters based on (State + Pixel Density)
+  pixel_count_weight: 0.5   # Relative weight of pixel count feature vs state
+
+balancing:
+  strategy: "percentile" # "percentile", "median", "mean"
+  value: 80              # e.g., Cap at the 80th percentile of cluster counts
+                         # Clusters with counts > 80th percentile will be downsampled to that value.
