@@ -4,6 +4,8 @@ Main model file for the Sparse Pixel Transformer (SPT).
 import torch
 import torch.nn as nn
 from omegaconf import DictConfig
+from torchvision.models.resnet import BasicBlock
+
 
 from .positional_encoding import create_positional_encoding
 
@@ -35,64 +37,7 @@ class StateVectorEncoder(nn.Module):
         return embeds.unsqueeze(1)
 
 
-class CrossAttentionDecoderLayer(nn.Module):
-    """
-    A custom Transformer Decoder layer that performs only Cross-Attention,
-    completely skipping the expensive self-attention step. This is crucial for
-    decoding large query grids (e.g., full image resolutions) without causing
-    CUDA OutOfMemory errors.
-    """
-    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1, batch_first=True):
-        super().__init__()
-        if not batch_first:
-            raise ValueError("This custom layer only supports batch_first=True")
-        
-        # Cross-Attention components
-        self.cross_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
-        self.norm1 = nn.LayerNorm(d_model)
-        self.dropout1 = nn.Dropout(dropout)
-        
-        # Feed-forward components
-        self.linear1 = nn.Linear(d_model, dim_feedforward)
-        self.activation = nn.functional.relu
-        self.dropout = nn.Dropout(dropout)
-        self.linear2 = nn.Linear(dim_feedforward, d_model)
-        self.norm2 = nn.LayerNorm(d_model)
-        self.dropout2 = nn.Dropout(dropout)
 
-    def forward(self, tgt, memory, memory_key_padding_mask=None, return_attn_weights=False):
-        """
-        Forward pass for cross-attention decoder layer.
-
-        Args:
-            tgt: Query tensor [B, num_queries, embed_dim]
-            memory: Key/Value tensor [B, num_keys, embed_dim]
-            memory_key_padding_mask: Padding mask for memory
-            return_attn_weights: If True, return attention weights
-
-        Returns:
-            tgt: Output tensor [B, num_queries, embed_dim]
-            attn_weights (optional): [B, num_heads, num_queries, num_keys]
-        """
-        # Cross-Attention block (query: tgt, key/value: memory)
-        attn_output, attn_weights = self.cross_attn(
-            query=tgt,
-            key=memory,
-            value=memory,
-            key_padding_mask=memory_key_padding_mask,
-            need_weights=True,
-            average_attn_weights=False  # Keep all heads for analysis
-        )
-        tgt = self.norm1(tgt + self.dropout1(attn_output))
-
-        # Feed-forward block
-        ff_output = self.linear2(self.dropout(self.activation(self.linear1(tgt))))
-        tgt = self.norm2(tgt + self.dropout2(ff_output))
-
-        if return_attn_weights:
-            return tgt, attn_weights  # [B, num_queries, embed_dim], [B, num_heads, num_queries, num_keys]
-        else:
-            return tgt
 
 class SparsePixelTransformer(nn.Module):
     """
@@ -136,58 +81,82 @@ class SparsePixelTransformer(nn.Module):
             learnable=pe_config.get('learnable', True)
         )
 
-        # 4. Sparse Transformer Encoder
+        # 4. Sparse Transformer Encoder (Pre-LN enabled)
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=self.embed_dim,
             nhead=self.num_heads,
             dim_feedforward=config.model.architecture.feedforward_dim,
             dropout=config.model.architecture.dropout,
-            batch_first=True
+            batch_first=True,
+            norm_first=True  # Optimization: Pre-LN for stability
         )
         self.encoder = nn.TransformerEncoder(
             encoder_layer,
             num_layers=self.num_encoder_layers
         )
 
-        # 5. State-Pixel Cross-Attention
-        self.state_pixel_attention = nn.MultiheadAttention(
-            embed_dim=self.embed_dim,
-            num_heads=self.num_heads,
-            dropout=config.model.architecture.dropout,
-            batch_first=True
-        )
-        
-        # 6. Skip Connection Projection (Option A: Encoder-Decoder Skip)
+        # 5. Skip Connection Projection (Option A: Encoder-Decoder Skip)
         if self.skip_enabled:
             self.skip_proj = nn.Sequential(
                 nn.Linear(self.embed_dim, self.embed_dim),
                 nn.Dropout(config.model.architecture.skip.dropout),
                 nn.LayerNorm(self.embed_dim)
             )
-        
-        # 7. Cross-Attention Decoder (Memory Efficient)
-        decoder_layers = [
-            CrossAttentionDecoderLayer(
-                d_model=self.embed_dim,
-                nhead=self.num_heads,
-                dim_feedforward=config.model.architecture.feedforward_dim,
-                dropout=config.model.architecture.dropout,
-                batch_first=True
-            ) for _ in range(self.num_decoder_layers)
-        ]
-        self.decoder = nn.ModuleList(decoder_layers)
 
-        # 8. CNN Refinement Head
-        refinement_channels = [self.embed_dim] + config.model.refinement_head.channels + [1]
-        refinement_layers = []
-        for i in range(len(refinement_channels) - 2):
-            refinement_layers.append(nn.Conv2d(refinement_channels[i], refinement_channels[i+1], kernel_size=3, padding=1))
-            refinement_layers.append(nn.ReLU(inplace=True))
-        refinement_layers.append(nn.Conv2d(refinement_channels[-2], refinement_channels[-1], kernel_size=3, padding=1))
-        refinement_layers.append(nn.Sigmoid())
-        self.refine_head = nn.Sequential(*refinement_layers)
+        # 6. Decoder (Standard PyTorch Transformer Decoder, Pre-LN)
+        decoder_layer = nn.TransformerDecoderLayer(
+            d_model=self.embed_dim,
+            nhead=self.num_heads,
+            dim_feedforward=config.model.architecture.feedforward_dim,
+            dropout=config.model.architecture.dropout,
+            batch_first=True,
+            norm_first=True  # Optimization: Pre-LN for stability
+        )
+        self.decoder = nn.TransformerDecoder(
+            decoder_layer,
+            num_layers=self.num_decoder_layers
+        )
+
+        # 7. ResNet-based Refinement Head (Hybrid Architecture, Grayscale Output)
+        # Replaces simple Conv2d stack with BasicBlock for better gradient flow
+        self.refine_head = nn.Sequential(
+            BasicBlock(self.embed_dim, self.embed_dim),
+            BasicBlock(self.embed_dim, self.embed_dim),
+            nn.Conv2d(self.embed_dim, 1, kernel_size=3, padding=1), # Output 1 channel (Grayscale)
+            # nn.Sigmoid() # Optional: clamp to 0-1. Can be omitted if loss handles logits, but Report suggests using it.
+                           # We will omit it for now to avoid saturation if using L2 on logits, 
+                           # but typically L2 expects same range. 
+                           # Re-enabling Sigmoid based on Report recommendation to ensure 0-1 output.
+            nn.Sigmoid()
+        )
 
         self.register_buffer('query_grid', None)
+        
+        # Initialize weights
+        self.apply(self._init_weights)
+
+        # Prevent Sigmoid saturation at the start:
+        # Initialize the final Conv2d (before Sigmoid) to small values/zeros.
+        # This ensures the model starts outputting neutral gray (0.5) instead of binary 0/1.
+        final_conv = self.refine_head[2] # Index 2 is the Conv2d
+        if isinstance(final_conv, nn.Conv2d):
+            nn.init.constant_(final_conv.weight, 0)
+            nn.init.constant_(final_conv.bias, 0)
+
+    def _init_weights(self, m):
+        """
+        ViT/BERT-style weight initialization.
+        """
+        if isinstance(m, nn.Linear):
+            nn.init.trunc_normal_(m.weight, std=0.02)
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.constant_(m.weight, 1.0)
+            nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.Conv2d):
+            nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+
         
     def _generate_query_grid(self, batch_size, height, width, device):
         """
@@ -220,7 +189,7 @@ class SparsePixelTransformer(nn.Module):
         # Repeat for batch: [H*W, 2] -> [B, H*W, 2]
         return self.query_grid.unsqueeze(0).repeat(batch_size, 1, 1)
 
-    def forward(self, sparse_pixels, state_vector, state_mask, resolution, return_attention=False):
+    def forward(self, sparse_pixels, state_vector, state_mask, resolution, num_pixels=None, return_attention=False):
         """
         Main forward pass for the SPT model.
 
@@ -229,6 +198,7 @@ class SparsePixelTransformer(nn.Module):
             state_vector: [B, max_state_dim] - State vector with sentinels
             state_mask: [B, max_state_dim] - Mask for valid states
             resolution: tuple (H, W) - Output resolution
+            num_pixels: [B] - Number of valid pixels per sample
             return_attention: bool - Whether to return attention weights
 
         Returns:
@@ -239,82 +209,119 @@ class SparsePixelTransformer(nn.Module):
         H, W = resolution
         device = sparse_pixels.device
 
-        # 1. Pixel embedding: [B, N, 3] -> [B, N, embed_dim]
+        # Create padding mask if num_pixels is provided
+        # pixel_padding_mask: [B, N], True where padding
+        pixel_padding_mask = None
+        if num_pixels is not None:
+            indices = torch.arange(N, device=device).unsqueeze(0).expand(B, N)
+            pixel_padding_mask = indices >= num_pixels.unsqueeze(1)
+
+        # 1. Pixel embedding: [B, N, embed_dim]
         pixel_embeds = self.pixel_embed(sparse_pixels)
 
+        # Apply mask to embeddings to zero out padded pixels
+        if pixel_padding_mask is not None:
+            pixel_embeds = pixel_embeds.masked_fill(pixel_padding_mask.unsqueeze(-1), 0.0)
+
         # 2. Positional encoding on pixel coordinates
-        uv_coords = sparse_pixels[:, :, :2]  # [B, N, 2]
+        uv_coords = sparse_pixels[:, :, :2]
         pixel_embeds = self.pos_encoder(pixel_embeds, uv_coords)
 
-        # 3. State vector encoding: [B, max_state_dim] -> [B, 1, embed_dim]
+        # Re-apply mask after positional encoding
+        if pixel_padding_mask is not None:
+            pixel_embeds = pixel_embeds.masked_fill(pixel_padding_mask.unsqueeze(-1), 0.0)
+
+        # 3. State vector encoding: [B, 1, embed_dim]
         state_embeds = self.state_encoder(state_vector, state_mask)
 
-        # 4. Sparse transformer encoder: [B, N, embed_dim] -> [B, N, embed_dim]
-        encoded = self.encoder(pixel_embeds)
+        # 4. Integrate State as a Special Token
+        # Prepend state token to pixel embeddings: [B, N+1, embed_dim]
+        encoder_input = torch.cat([state_embeds, pixel_embeds], dim=1)
 
-        # 5. State-pixel cross-attention
-        state_conditioned, _ = self.state_pixel_attention(
-            query=state_embeds,  # [B, 1, embed_dim]
-            key=encoded,         # [B, N, embed_dim]
-            value=encoded        # [B, N, embed_dim]
-        )  # Output: [B, 1, embed_dim]
+        # Adjust padding mask for the new token
+        # The state token (index 0) is always valid (False in padding mask)
+        if pixel_padding_mask is not None:
+            # Prepend a column of False (valid) to the mask
+            state_token_mask = torch.zeros(B, 1, dtype=torch.bool, device=device)
+            encoder_padding_mask = torch.cat([state_token_mask, pixel_padding_mask], dim=1) # [B, N+1]
+        else:
+            encoder_padding_mask = None
 
-        # 6. Broadcast state information to all pixels
-        encoded = encoded + state_conditioned.expand(-1, N, -1)
-        
-        # 7. Prepare skip connection: average encoder output across pixels
+        # 5. Sparse Transformer Encoder
+        # Output: [B, N+1, embed_dim]
+        encoded_full = self.encoder(encoder_input, src_key_padding_mask=encoder_padding_mask)
+
+        # Separate state token and pixel tokens ??
+        # For Decoder memory, we can use the full sequence (State + Pixels) as Memory
+        # This allows the decoder to attend to the Global State as well.
+        memory = encoded_full
+        memory_key_padding_mask = encoder_padding_mask
+
+        # Extract pixel part for Skip Connection (if needed)
+        # encoded_pixels = encoded_full[:, 1:, :] # [B, N, D]
+
+        # 6. Skip Connection Calculation
         if self.skip_enabled:
-            # Average pooling over sparse pixels: [B, N, embed_dim] -> [B, 1, embed_dim]
-            encoded_avg = encoded.mean(dim=1, keepdim=True)  # Global context from encoder
-            encoded_avg_proj = self.skip_proj(encoded_avg)  # Project for skip
+            # We want to use the Global Context from the encoder.
+            # The State Token itself (encoded_full[:, 0, :]) is a good candidate for global context.
+            # Or we can average the pixel tokens as before.
+            # Let's use the average of *pixel* tokens for consistency with previous logic,
+            # but using the State Token might be cleaner.
+            # Given the previous logic was "Global Context", let's try using the State Token 
+            # as the Representative Global Context if it learns well. 
+            # However, to be safe and robust, let's Stick to the Average Pooling of Pixels,
+            # as the State Token might focus only on State info.
+            
+            encoded_pixels = encoded_full[:, 1:, :]
+            
+            if pixel_padding_mask is not None:
+                valid_mask = (~pixel_padding_mask).float().unsqueeze(-1)
+                encoded_masked = encoded_pixels * valid_mask
+                
+                encoded_sum = encoded_masked.sum(dim=1, keepdim=True)
+                valid_count = valid_mask.sum(dim=1, keepdim=True)
+                valid_count = torch.clamp(valid_count, min=1.0)
+                encoded_avg = encoded_sum / valid_count
+            else:
+                encoded_avg = encoded_pixels.mean(dim=1, keepdim=True)
+            
+            encoded_avg_proj = self.skip_proj(encoded_avg)
 
-        # 8. Generate query grid for full frame: [B, H*W, 2]
+        # 7. Generate query grid for full frame: [B, H*W, 2]
         query_positions = self._generate_query_grid(B, H, W, device)
 
-        # 9. Create query embeddings with only positional information
+        # 8. Create query embeddings with only positional information
         query_embeds = torch.zeros(B, H*W, self.embed_dim, device=device)
         query_embeds = self.pos_encoder(query_embeds, query_positions)
 
-        # 10. Decoder: cross-attention between queries and encoded sparse pixels
-        decoded = query_embeds
-        all_attn_weights = []
+        # 9. Decoder: Standard Transformer Decoder
+        # tgt: [B, H*W, D]
+        # memory: [B, N+1, D]
+        decoded = self.decoder(
+            tgt=query_embeds,
+            memory=memory,
+            memory_key_padding_mask=memory_key_padding_mask
+            # tgt_mask=None (non-causal, all positions attend to all)
+        )
 
-        for layer in self.decoder:
-            if return_attention:
-                decoded, layer_attn = layer(
-                    tgt=decoded,
-                    memory=encoded,
-                    return_attn_weights=True
-                )
-                all_attn_weights.append(layer_attn)  # [B, num_heads, H*W, N]
-            else:
-                decoded = layer(tgt=decoded, memory=encoded)
-            
-            # Skip connection: Add encoder global context to decoder output
-            if self.skip_enabled:
-                decoded = decoded + self.skip_weight * encoded_avg_proj.expand(-1, decoded.shape[1], -1)
-        # Output: [B, H*W, embed_dim]
+        # Skip connection injection
+        if self.skip_enabled:
+             decoded = decoded + self.skip_weight * encoded_avg_proj.expand(-1, decoded.shape[1], -1)
 
         # 10. Reshape to 2D spatial format
         decoded_2d = decoded.view(B, H, W, self.embed_dim)
         decoded_2d = decoded_2d.permute(0, 3, 1, 2)  # [B, embed_dim, H, W]
 
-        # 11. CNN refinement head
+        # 11. CNN refinement head (ResNet + Sigmoid)
         output = self.refine_head(decoded_2d)  # [B, 1, H, W]
 
-        # 12. Return with or without attention weights
+        # 12. Return
         if return_attention:
-            # Aggregate attention weights: average across layers and heads
-            # Stack: [num_layers, B, num_heads, H*W, N]
-            stacked_attn = torch.stack(all_attn_weights, dim=0)
-
-            # Average across layers: [B, num_heads, H*W, N]
-            avg_attn_layers = stacked_attn.mean(dim=0)
-
-            # Average across heads: [B, H*W, N]
-            final_attn = avg_attn_layers.mean(dim=1)
-
-            return output, final_attn
+            # Native TransformerDecoder doesn't easily return weights from forward()
+            # We would need to use hooks or access layers. 
+            # For now, return None for weights or implement a custom hook if strictly needed.
+            # Considering the complexity, we will return None for weights in this standard implementation.
+            return output, None
         else:
             return output
 

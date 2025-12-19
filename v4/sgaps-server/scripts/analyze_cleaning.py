@@ -43,12 +43,25 @@ def main(cfg: DictConfig) -> None:
     # Wait, the current dataset implementation takes h5_paths as arg. 
     # I need to find them first like in train.py.
     checkpoint_path = cfg.training.checkpoint.checkpoint_path
+    checkpoint_key = cfg.training.checkpoint.checkpoint_key
+    print(f"Searching for checkpoint_key: '{checkpoint_key}' in {checkpoint_path}...")
+
     all_h5_files = list(Path(checkpoint_path).glob("**/*.h5"))
-    if not all_h5_files:
-        print(f"No HDF5 files found in {checkpoint_path}")
+    
+    # Filter for exact match
+    target_files = [f for f in all_h5_files if f.stem == checkpoint_key]
+    
+    if len(target_files) == 0:
+        print(f"Error: No HDF5 file found matching checkpoint_key '{checkpoint_key}' in {checkpoint_path}")
         return
-        
-    dataset = SGAPSDataset([str(p) for p in all_h5_files], cfg)
+    elif len(target_files) > 1:
+        print(f"Error: Multiple files found matching '{checkpoint_key}': {target_files}. Please ensure uniqueness.")
+        return
+    
+    target_file = target_files[0]
+    print(f"Found match: {target_file}")
+
+    dataset = SGAPSDataset([str(target_file)], cfg)
     print(f"Total Raw Frames: {len(dataset)}")
     
     # 4. Load State Vectors, Pixel Counts (and store path/keys for Image Loading later)

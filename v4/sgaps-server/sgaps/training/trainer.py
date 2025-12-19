@@ -2,6 +2,8 @@
 Training pipeline for the Sparse Pixel Transformer.
 """
 import torch
+from torch.nn.attention import sdpa_kernel, SDPBackend
+import torch.nn as nn
 from tqdm import tqdm
 from omegaconf import DictConfig
 import numpy as np
@@ -48,8 +50,14 @@ class SGAPSTrainer:
         )
 
         # Loss function
-        from sgaps.models.losses import SampledPixelL2Loss
-        self.criterion = SampledPixelL2Loss()
+        # Loss function selection
+        if config.loss.type == "sampled_pixel_l2":
+            from sgaps.models.losses import SampledPixelL2Loss
+            self.criterion = SampledPixelL2Loss()
+        elif config.loss.type == "full_l2":
+            self.criterion = nn.MSELoss()
+        else:
+            raise ValueError(f"Unknown loss type: {config.loss.type}")
 
         # Automatic Mixed Precision
         self.scaler = torch.amp.GradScaler('cuda', enabled=self.config.training.use_amp)
@@ -80,14 +88,35 @@ class SGAPSTrainer:
             state_vector = batch["state_vector"].to(self.device)
             state_mask = batch["state_mask"].to(self.device)
             resolution = batch["resolution"].to(self.device)
+            num_pixels = batch["num_pixels"].to(self.device)
 
-            with torch.amp.autocast('cuda', enabled=self.config.training.use_amp):
+            # Enforce FlashAttention for speed and memory efficiency
+            # Fallback to mem_efficient if flash is not available, but avoid slow math kernel
+            with sdpa_kernel([SDPBackend.FLASH_ATTENTION, SDPBackend.EFFICIENT_ATTENTION]), \
+                 torch.amp.autocast('cuda', enabled=self.config.training.use_amp):
                 # Assuming all resolutions in the batch are the same, use the first one.
                 resolution_tuple = (resolution[0, 0].item(), resolution[0, 1].item())
-                pred = self.model(sparse_pixels, state_vector, state_mask, resolution_tuple)
                 
-                # The criterion's forward pass also needs to be implemented
-                losses = self.criterion(pred, gt_frame, sparse_pixels[:, :, :2])
+                # Pass num_pixels to model to enable internal masking (Attn, Skip, etc.)
+                pred = self.model(
+                    sparse_pixels, 
+                    state_vector, 
+                    state_mask, 
+                    resolution_tuple,
+                    num_pixels=num_pixels
+                )
+                
+                # Create pixel_padding_mask for loss function
+                # Logic must match model's mask generation (True=Padding/Ignore)
+                B, N, _ = sparse_pixels.shape
+                indices = torch.arange(N, device=self.device).unsqueeze(0).expand(B, N)
+                pixel_padding_mask = indices >= num_pixels.unsqueeze(1)
+                
+                if self.config.loss.type == "sampled_pixel_l2":
+                    losses = self.criterion(pred, gt_frame, sparse_pixels[:, :, :2], pixel_padding_mask=pixel_padding_mask)
+                else:
+                     # For Full L2, we compare full prediction against full GT
+                    losses = {"total": self.criterion(pred, gt_frame)}
 
             self.optimizer.zero_grad()
             self.scaler.scale(losses["total"]).backward()
@@ -102,8 +131,61 @@ class SGAPSTrainer:
                     "Train/loss_step": losses["total"].item(),
                     "Train/lr": self.optimizer.param_groups[0]["lr"]
                 })
+            
+            # --- DEBUG VISUALIZATION ---
+            # Save debug images every 10 batches to verify data and model output
+            if progress.n % 50 == 0:
+                step = progress.n
+                debug_dir = Path("debug_outputs") / f"epoch_{epoch}"
+                debug_dir.mkdir(parents=True, exist_ok=True)
+                
+                # Use the first item in the batch for visualization
+                # Detach and move to CPU
+                sparse_pixels_viz = sparse_pixels[0].detach().cpu().numpy() # [N, 3]
+                gt_frame_viz = gt_frame[0].detach().cpu().numpy().squeeze() # [H, W] (0-1 float)
+                pred_viz = pred[0].detach().cpu().numpy().squeeze() # [H, W] (sigmoid output 0-1)
+                
+                # Rescale GT for visualization (0-255 uint8) if it's float [0, 1]
+                if gt_frame_viz.max() <= 1.0:
+                    gt_frame_viz = (gt_frame_viz * 255).astype(np.uint8)
+                else:
+                    gt_frame_viz = gt_frame_viz.astype(np.uint8)
+
+                # Rescale Pred
+                pred_viz = np.clip(pred_viz, 0.0, 1.0) # Clamp to valid range (since Sigmoid is removed)
+                pred_viz = (pred_viz * 255).astype(np.uint8)
+
+                # Helper to create a simple grid using PIL if DebugVisualizer fails or adds too much overhead
+                # But here we will try to use the existing DebugVisualizer if possible, 
+                # or a simple fallback since we want to be sure it works.
+                try:
+                    from sgaps.utils.visualization import DebugVisualizer
+                    if not hasattr(self, 'viz'):
+                        self.viz = DebugVisualizer(self.config)
+                    
+                    # Create dashboard
+                    # We pass dummy importance/state for now to reuse the class
+                    img = self.viz.create_composite_dashboard(
+                        original_frame=gt_frame_viz,
+                        reconstructed_frame=pred_viz,
+                        sampled_pixels=sparse_pixels_viz[:, :2], # UVs
+                        state_vector=state_vector[0].detach().cpu().numpy(),
+                        importance_map=np.zeros_like(gt_frame_viz, dtype=np.float32), # Placeholder
+                        metadata={'frame_id': f"{epoch}_{step}", 'loss': losses["total"].item()}
+                    )
+                    img.save(debug_dir / f"step_{step}.png")
+                except Exception as e:
+                    # Fallback: Simple concatenation using standard libraries
+                    import cv2
+                    # Difference map
+                    diff = np.abs(gt_frame_viz.astype(int) - pred_viz.astype(int)).astype(np.uint8)
+                    # Stack: GT | Pred | Diff
+                    debug_img = np.hstack([gt_frame_viz, pred_viz, diff])
+                    cv2.imwrite(str(debug_dir / f"step_{step}_fallback.png"), debug_img)
+                    print(f"Viz Error: {e}")
 
         avg_loss = total_loss / len(self.train_loader)
+
         if self.use_wandb and self.wandb:
             self.wandb.log({"Train/loss_epoch": avg_loss, "epoch": epoch})
         
@@ -125,13 +207,17 @@ class SGAPSTrainer:
                 state_mask = batch["state_mask"].to(self.device)
                 resolution = batch["resolution"].to(self.device)
 
-                with torch.amp.autocast('cuda', enabled=self.config.training.use_amp):
+                with sdpa_kernel([SDPBackend.FLASH_ATTENTION, SDPBackend.EFFICIENT_ATTENTION]), \
+                     torch.amp.autocast('cuda', enabled=self.config.training.use_amp):
                     # Assuming all resolutions in the batch are the same, use the first one.
                     resolution_tuple = (resolution[0, 0].item(), resolution[0, 1].item())
                     pred = self.model(sparse_pixels, state_vector, state_mask, resolution_tuple)
                     
                     # Use the same criterion as training to calculate validation loss
-                    losses = self.criterion(pred, gt_frame, sparse_pixels[:, :, :2])
+                    if self.config.loss.type == "sampled_pixel_l2":
+                        losses = self.criterion(pred, gt_frame, sparse_pixels[:, :, :2])
+                    else:
+                        losses = {"total": self.criterion(pred, gt_frame)}
                 
                 total_val_loss += losses["total"].item()
                 val_progress.set_postfix(val_loss=losses["total"].item())

@@ -152,8 +152,12 @@ class SGAPSDataset(Dataset):
         if gt_tensor.shape[2:] != target_resolution:
             gt_tensor = torch.nn.functional.interpolate(gt_tensor, size=target_resolution, mode='bilinear', align_corners=False)
 
+        # Normalize sparse_pixels values (column 2) to [0, 1]
+        sparse_pixels_norm = torch.from_numpy(sparse_pixels).float()
+        sparse_pixels_norm[:, 2] /= 255.0
+
         return {
-            "sparse_pixels": torch.from_numpy(sparse_pixels).float(),
+            "sparse_pixels": sparse_pixels_norm,
             "gt_frame": gt_tensor.squeeze(0),  # Shape: [1, H_new, W_new]
             "state_vector": torch.from_numpy(state_vector).float(),
             "state_mask": torch.from_numpy(state_mask).float(),

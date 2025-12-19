@@ -93,17 +93,28 @@ def main(cfg: DictConfig) -> None:
     # 4. Initialize Datasets and DataLoaders
     print("Initializing datasets...")
     
-    # Find all HDF5 files in the configured checkpoint_path directory
-    checkpoint_path = cfg.training.checkpoint.checkpoint_path
-    all_h5_files = list(Path(checkpoint_path).glob("**/*.h5"))
+    # Find the specific HDF5 file matching the checkpoint_key
+    checkpoint_path = Path(cfg.training.checkpoint.checkpoint_path)
     
-    if not all_h5_files:
-        raise FileNotFoundError(f"No HDF5 data found in {checkpoint_path}. Please ensure HDF5 files are present.")
+    # Ensure goal is to find exact match for checkpoint_key
+    # If key is "myrun", look for "myrun.h5". If "myrun.h5", look for "myrun.h5"
+    target_filename = f"{checkpoint_key}.h5" if not checkpoint_key.endswith('.h5') else checkpoint_key
     
-    print(f"Found {len(all_h5_files)} HDF5 files.")
+    # Search recursively for this specific file
+    found_files = list(checkpoint_path.rglob(target_filename))
+    
+    if not found_files:
+        raise FileNotFoundError(f"No HDF5 file found matching '{target_filename}' in {checkpoint_path}")
+    
+    if len(found_files) > 1:
+        print(f"Warning: Multiple files found with name '{target_filename}': {found_files}. Terminate.")
+        exit()
+    
+    target_file = found_files[0]
+    print(f"Found specific HDF5 file: {target_file}")
 
-    # Create a single dataset with all files
-    full_dataset = SGAPSDataset(all_h5_files, cfg)
+    # Create a single dataset with this specific file
+    full_dataset = SGAPSDataset([target_file], cfg)
 
     # Split the dataset into training and validation sets dynamically
     train_ratio = cfg.data.split_ratios[0]

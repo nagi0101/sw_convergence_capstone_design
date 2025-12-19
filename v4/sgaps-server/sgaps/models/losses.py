@@ -17,7 +17,7 @@ class SampledPixelL2Loss(nn.Module):
         super().__init__()
         self.config = config
 
-    def forward(self, pred: torch.Tensor, target: torch.Tensor, sampled_coords: torch.Tensor) -> dict:
+    def forward(self, pred: torch.Tensor, target: torch.Tensor, sampled_coords: torch.Tensor, pixel_padding_mask: torch.Tensor = None) -> dict:
         """
         Calculates the loss.
 
@@ -28,6 +28,8 @@ class SampledPixelL2Loss(nn.Module):
                     Shape: [B, 1, H, W]
             sampled_coords: The (u, v) coordinates of the pixels that were sampled.
                             Shape: [B, N, 2] (u, v in [0, 1] range)
+            pixel_padding_mask: Boolean mask where True indicates padding (to be ignored).
+                                Shape: [B, N]
 
         Returns:
             A dictionary containing the calculated loss values.
@@ -57,8 +59,34 @@ class SampledPixelL2Loss(nn.Module):
         pred_sampled = torch.gather(pred_flat, dim=1, index=flat_indices)    # Shape: [B, N]
         target_sampled = torch.gather(target_flat, dim=1, index=flat_indices)  # Shape: [B, N]
 
-        # 5. Calculate the Mean Squared Error between the predicted and ground truth sampled pixels.
-        l2_loss = F.mse_loss(pred_sampled, target_sampled)
+        # 5. Calculate loss, ignoring padded pixels if mask is provided
+        diff = pred_sampled - target_sampled
+        squared_diff = diff ** 2  # [B, N]
+
+        if pixel_padding_mask is not None:
+            # pixel_padding_mask: True=Padding (Ignore), False=Valid
+            valid_mask = (~pixel_padding_mask).float() # [B, N]
+            
+            # Apply mask
+            squared_diff = squared_diff * valid_mask
+            
+            # Per-sample sum of errors: [B]
+            sample_error_sum = squared_diff.sum(dim=1)
+            
+            # Per-sample count of valid pixels: [B]
+            sample_valid_count = valid_mask.sum(dim=1)
+            
+            # Avoid division by zero (if a sample has 0 valid pixels, loss is 0)
+            sample_valid_count = torch.clamp(sample_valid_count, min=1.0)
+            
+            # Per-sample MSE: [B]
+            sample_mse = sample_error_sum / sample_valid_count
+            
+            # Batch Loss: Mean of sample MSEs
+            l2_loss = sample_mse.mean()
+        else:
+            # Fallback if no mask (assuming all valid)
+            l2_loss = squared_diff.mean()
 
         return {
             "total": l2_loss,

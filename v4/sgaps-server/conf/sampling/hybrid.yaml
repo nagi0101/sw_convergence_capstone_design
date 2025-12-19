@@ -4,9 +4,9 @@
 pattern: "hybrid"
 
 # Sample count constraints
-default_sample_count: 500
+default_sample_count: 3000
 min_sample_count: 250
-max_sample_count: 1000
+max_sample_count: 3000
 
 # Multi-strategy composition
 # Note: Current implementation uses importance + uniform (2 strategies)
@@ -28,10 +28,10 @@ importance:
 
 # Sampling distribution (currently active implementation)
 distribution:
-    importance_ratio: 0.6  # 60% from high-importance regions
-    uniform_ratio: 0.4     # 40% uniform coverage
+    importance_ratio: 0.6 # 60% from high-importance regions
+    uniform_ratio: 0.4 # 40% uniform coverage
 
 # Update behavior
 update:
-    frequency: 1            # Update sampling every N frames
-    warmup_frames: 10       # Use uniform sampling for first N frames
+    frequency: 1 # Update sampling every N frames
+    warmup_frames: 10 # Use uniform sampling for first N frames

@@ -7,7 +7,9 @@ using a trained Sparse Pixel Transformer (SPT) model.
 import logging
 from typing import Dict, Tuple, Any
 import numpy as np
+import numpy as np
 import torch
+from torch.nn.attention import sdpa_kernel, SDPBackend
 from omegaconf import DictConfig
 from pathlib import Path
 
@@ -93,7 +95,8 @@ class FrameReconstructor:
 
         # 3. Perform inference
         try:
-            with torch.amp.autocast(device_type='cuda', dtype=torch.float16, enabled=self.config.training.use_amp):
+            with sdpa_kernel([SDPBackend.FLASH_ATTENTION, SDPBackend.EFFICIENT_ATTENTION]), \
+                 torch.amp.autocast(device_type='cuda', dtype=torch.float16, enabled=self.config.training.use_amp):
                 recons_frame, attn_weights = model(
                     pixels_tensor,
                     state_tensor,
