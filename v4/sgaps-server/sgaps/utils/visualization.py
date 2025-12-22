@@ -104,13 +104,17 @@ class DebugVisualizer:
                 )
 
                 # Normalize frames to same size
-                original = self._normalize_frame(original_frame, reconstructed_frame.shape)
+                original = self._normalize_frame(original_frame)
                 reconstructed = self._normalize_frame(reconstructed_frame)
 
                 # Row 1: Frame comparisons
-                self._plot_frame(axes[0, 0], original, "Original")
-                self._plot_frame(axes[0, 1], reconstructed, "Reconstructed")
+                self._plot_frame(axes[0, 0], original, "Original (sRGB)")
+                self._plot_frame(axes[0, 1], reconstructed, "Reconstructed (sRGB)")
+                
+                # Difference
                 self._plot_difference(axes[0, 2], original, reconstructed, cmap)
+                
+                # Sampled Pixels
                 self._plot_sampled_pixels(axes[0, 3], original, sampled_pixels)
 
                 # Row 2: Analysis heatmaps

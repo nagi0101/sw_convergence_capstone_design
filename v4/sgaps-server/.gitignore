@@ -1,3 +1,7 @@
 data/*.h5
 wandb/
 checkpoints/
+outputs/
+logs/
+debug_outputs/
+__pycache__/

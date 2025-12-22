@@ -345,33 +345,35 @@ namespace SGAPS.Runtime.Core
         }
 
         /// <summary>
-        /// Captures a RenderTexture as JPG and encodes to Base64.
-        /// Optimized for speed and size for debug purposes.
+        /// Captures a RenderTexture as PNG and encodes to Base64.
+        /// Uses linear:true parameter to prevent unwanted gamma conversion.
         /// </summary>
         private string EncodeTextureAsJPG(RenderTexture rt)
         {
             try
             {
-                // Create temporary texture to read pixels from the render texture
-                Texture2D tex = new Texture2D(rt.width, rt.height, TextureFormat.R8, false);
+                // Create temporary LINEAR texture to prevent gamma conversion during PNG encoding
+                // The RenderTexture contains sRGB data, but we mark the Texture2D as Linear
+                // to prevent Unity from applying sRGB→Linear conversion during EncodeToPNG()
+                Texture2D tex = new Texture2D(rt.width, rt.height, TextureFormat.R8, false, linear: true);
 
                 RenderTexture.active = rt;
                 tex.ReadPixels(new Rect(0, 0, rt.width, rt.height), 0, 0);
                 tex.Apply();
                 RenderTexture.active = null;
 
-                // Encode to JPG for smaller size and faster encoding
-                byte[] jpgBytes = tex.EncodeToJPG(75); // 75% quality is a good balance
+                // Encode to PNG (lossless) - now PNG will contain sRGB data without conversion
+                byte[] pngBytes = tex.EncodeToPNG();
 
                 // Clean up
                 UnityEngine.Object.Destroy(tex);
 
                 // Convert to Base64
-                return System.Convert.ToBase64String(jpgBytes);
+                return System.Convert.ToBase64String(pngBytes);
             }
             catch (Exception ex)
             {
-                Debug.LogError($"[SGAPS] Error encoding texture as JPG: {ex.Message}");
+                Debug.LogError($"[SGAPS] Error encoding texture as PNG: {ex.Message}");
                 return string.Empty;
             }
         }
@@ -433,7 +435,6 @@ namespace SGAPS.Runtime.Core
         private void HandleUVCoordinatesReceived(UVCoordinates uvCoords)
         {
             currentUVCoordinates = uvCoords;
-            Debug.Log($"[SGAPS] Received {uvCoords.Count} UV coordinates for frame {uvCoords.TargetFrameId}");
         }
 
         private void HandleError(string error)
@@ -457,7 +458,7 @@ namespace SGAPS.Runtime.Core
                 networkClient.OnSessionStarted -= HandleSessionStarted;
                 networkClient.OnUVCoordinatesReceived -= HandleUVCoordinatesReceived;
                 networkClient.OnError -= HandleError;
-                
+
                 // Force disconnect without graceful close to ensure immediate cleanup
                 // This is important for Unity Editor play mode exit
                 networkClient.ForceDisconnect(graceful: false);

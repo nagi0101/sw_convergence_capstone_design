@@ -73,7 +73,8 @@ namespace SGAPS.Runtime.Core
 
             if (screenRT == null)
             {
-                screenRT = new RenderTexture(width, height, 0, RenderTextureFormat.ARGB32)
+                // Explicitly use Linear read/write to prevent implicit sRGB conversions by Unity
+                screenRT = new RenderTexture(width, height, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Linear)
                 {
                     name = "SGAPS_ScreenRT",
                     filterMode = FilterMode.Point,
@@ -81,7 +82,7 @@ namespace SGAPS.Runtime.Core
                 };
                 screenRT.Create();
 
-                grayscaleRT = new RenderTexture(width, height, 0, RenderTextureFormat.R8)
+                grayscaleRT = new RenderTexture(width, height, 0, RenderTextureFormat.R8, RenderTextureReadWrite.Linear)
                 {
                     name = "SGAPS_GrayscaleRT",
                     filterMode = FilterMode.Bilinear, // Bilinear is better for downsampling
@@ -89,7 +90,7 @@ namespace SGAPS.Runtime.Core
                 };
                 grayscaleRT.Create();
 
-                debugRT = new RenderTexture(debugTextureSize.x, debugTextureSize.y, 0, RenderTextureFormat.R8)
+                debugRT = new RenderTexture(debugTextureSize.x, debugTextureSize.y, 0, RenderTextureFormat.R8, RenderTextureReadWrite.Linear)
                 {
                     name = "SGAPS_DebugRT",
                     filterMode = FilterMode.Bilinear,
@@ -98,7 +99,7 @@ namespace SGAPS.Runtime.Core
                 debugRT.Create();
 
                 lastScreenSize = new Vector2Int(width, height);
-                Debug.Log($"[SGAPS.FrameCaptureHandler] Created RenderTextures. Screen: {width}x{height}, Debug: {debugTextureSize.x}x{debugTextureSize.y}");
+                Debug.Log($"[SGAPS.FrameCaptureHandler] Created RenderTextures (Linear). Screen: {width}x{height}, Debug: {debugTextureSize.x}x{debugTextureSize.y}");
             }
         }
 
@@ -131,21 +132,23 @@ namespace SGAPS.Runtime.Core
             EnsureRenderTextures();
 
             ScreenCapture.CaptureScreenshotIntoRenderTexture(screenRT);
+
             Graphics.Blit(screenRT, grayscaleRT, grayscaleMaterial);
 
             return grayscaleRT;
         }
 
         /// <summary>
-        /// Captures and downsamples the screen for efficient debug frame transmission.
+        /// Downsamples the current grayscale texture for debug frame transmission.
+        /// Assumes CaptureScreen() has already been called for this frame.
         /// </summary>
         /// <returns>A low-resolution grayscale RenderTexture of the captured screen.</returns>
         public RenderTexture CaptureDebugFrameTexture()
         {
-            // First, get the full-res grayscale capture
-            CaptureScreen();
+            // Do NOT call CaptureScreen() here. It causes artifacts (Red Channel Bug) and is redundant.
+            // SGAPSManager calls CaptureScreen() before calling this.
 
-            // Now, downsample it to the debug texture
+            // Downsample the existing grayscaleRT to the debug texture
             Graphics.Blit(grayscaleRT, debugRT);
 
             return debugRT;

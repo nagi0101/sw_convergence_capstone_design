@@ -527,7 +527,6 @@ namespace SGAPS.Runtime.Core
 
                 var uvCoords = new UVCoordinates(targetFrameId, coords);
 
-                Debug.Log($"[SGAPS.NetworkClient] Received {coords.Length} UV coordinates for frame {targetFrameId}");
                 MainThreadDispatcher.Enqueue(() => OnUVCoordinatesReceived?.Invoke(uvCoords));
             }
             catch (Exception ex)
