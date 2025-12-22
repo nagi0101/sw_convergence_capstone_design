@@ -8,7 +8,7 @@ SGAPS-MAE는 게임 세션 리플레이를 위한 혁신적인 픽셀 단위 적
 
 -   **서버 주도 샘플링**: 모든 지능을 서버에 집중, 클라이언트는 단순 픽셀 추출만 수행
 -   **픽셀 단위 적응**: 정보량이 높은 픽셀만 선택적 샘플링
--   **실시간 피드백 루프**: 복원 품질 기반 동적 샘플링 최적화
+-   **픽셀 단위 적응**: Attention Entropy 기반 중요도 샘플링
 -   **극한 압축**: 250-1000개 픽셀(0.5-2%)만으로 224×224 프레임 복원
 
 ## 시스템 아키텍처
@@ -68,62 +68,36 @@ flowchart TB
 
 ```mermaid
 flowchart LR
-    subgraph Frame_t["Frame t"]
-        Reconstruction_t["복원 결과"]
-        Uncertainty_t["불확실성 맵<br/>Monte Carlo Dropout"]
-        Attention_t["Attention 가중치<br/>정보 부족 영역"]
-        Temporal_t["시간적 오차<br/>일관성 분석"]
+    subgraph Frame_t["Current Frame"]
+        Reconstruction["복원 결과"]
+        Attention["Attention 가중치<br/>(Cross-Attention)"]
     end
 
     subgraph Analysis["중요도 분석"]
+        Entropy["Attention Entropy<br/>불확실성 계산"]
         ImportanceMap["중요도 맵 생성<br/>H×W"]
-        Hierarchy["계층적 분류"]
-        Critical["Critical: 10%<br/>크로스헤어, 적"]
-        Important["Important: 20%<br/>캐릭터, 객체"]
-        Moderate["Moderate: 30%<br/>환경 디테일"]
-        Optional["Optional: 40%<br/>배경, 장식"]
     end
 
-    subgraph Prediction["모션 예측"]
-        OpticalFlow["광학 흐름 추정"]
-        CameraMotion["카메라 모션 보상"]
-        LatencyComp["지연 보상<br/>t+2 예측"]
+    subgraph Sampling["적응적 샘플링"]
+        Strategy["하이브리드 전략<br/>60% 중요도 + 40% 균등"]
+        Collision["충돌 회피<br/>Minimum Distance"]
     end
 
-    subgraph Frame_t2["Frame t+2"]
-        FutureCoords["예측 좌표<br/>[(u',v')...]"]
-        Budget["샘플링 예산<br/>500 pixels"]
+    subgraph Next_Frame["Next Frame"]
+        NextUV["다음 UV 좌표<br/>[(u,v)...]"]
     end
 
-    Reconstruction_t --> Uncertainty_t
-    Reconstruction_t --> Attention_t
-    Reconstruction_t --> Temporal_t
-
-    Uncertainty_t -->|"0.4"| ImportanceMap
-    Attention_t -->|"0.3"| ImportanceMap
-    Temporal_t -->|"0.3"| ImportanceMap
-
-    ImportanceMap --> Hierarchy
-    Hierarchy --> Critical
-    Hierarchy --> Important
-    Hierarchy --> Moderate
-    Hierarchy --> Optional
-
-    Critical --> Budget
-    Important --> Budget
-    Moderate --> Budget
-
-    ImportanceMap --> OpticalFlow
-    OpticalFlow --> CameraMotion
-    CameraMotion --> LatencyComp
-    LatencyComp --> FutureCoords
-
-    Budget --> FutureCoords
+    Reconstruction --> Attention
+    Attention --> Entropy
+    Entropy --> ImportanceMap
+    ImportanceMap --> Strategy
+    Strategy --> Collision
+    Collision --> NextUV
 
     style Frame_t fill:#f3e5f5,stroke:#4a148c,stroke-width:2px
     style Analysis fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
-    style Prediction fill:#fff3e0,stroke:#ef6c00,stroke-width:2px
-    style Frame_t2 fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
+    style Sampling fill:#fff3e0,stroke:#ef6c00,stroke-width:2px
+    style Next_Frame fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
 ```
 
 ### Sparse Pixel Transformer 아키텍처
@@ -223,63 +197,6 @@ model:
     max_state_dim: 64 # 상태 벡터 최대 차원
 ```
 
-### Temporal Memory Bank 구조 (Phase 2+ 예정)
-
-> **Note**: Temporal Memory Bank는 Phase 2 이후 적응적 샘플링 구현 시 추가될 예정입니다.
-> 현재 Phase 1에서는 고정된 UV 좌표 샘플링을 사용합니다.
-
-```mermaid
-flowchart TB
-    subgraph MemoryBank["Temporal Memory Bank"]
-        subgraph StaticMemory["장기 메모리 (정적 요소)"]
-            UI["UI/HUD 요소<br/>신뢰도 > 0.9"]
-            Background["고정 배경<br/>움직임 < 0.1"]
-            StaticConf["신뢰도 맵<br/>EMA 업데이트"]
-        end
-
-        subgraph DynamicMemory["단기 메모리 (동적 요소)"]
-            MovingObjects["움직이는 객체<br/>FIFO Queue"]
-            RecentFrames["최근 100 프레임<br/>Deque"]
-            MotionVectors["모션 벡터<br/>광학 흐름"]
-        end
-
-        subgraph UpdateLogic["업데이트 로직"]
-            MotionScore["움직임 점수 계산"]
-            Decision["정적/동적 판별<br/>threshold: 0.1"]
-            EMAUpdate["EMA 업데이트<br/>α=0.95"]
-            QueuePush["Queue Push<br/>maxlen=100"]
-        end
-    end
-
-    subgraph Usage["메모리 활용"]
-        StaticRetrieval["정적 픽셀 검색<br/>conf > 0.9"]
-        DynamicMask["동적 영역 마스크"]
-        BudgetReduction["샘플링 예산 감소<br/>500 → 300"]
-        FocusedSampling["동적 영역 집중<br/>샘플링"]
-    end
-
-    NewPixel["새 픽셀 입력<br/>(pos, val, frame_idx)"]
-
-    NewPixel --> MotionScore
-    MotionScore --> Decision
-
-    Decision -->|"< 0.1"| EMAUpdate
-    Decision -->|">= 0.1"| QueuePush
-
-    EMAUpdate --> StaticMemory
-    QueuePush --> DynamicMemory
-
-    StaticMemory --> StaticRetrieval
-    StaticRetrieval --> DynamicMask
-    DynamicMask --> BudgetReduction
-    BudgetReduction --> FocusedSampling
-
-    style StaticMemory fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
-    style DynamicMemory fill:#fff3e0,stroke:#ef6c00,stroke-width:2px
-    style UpdateLogic fill:#f3e5f5,stroke:#4a148c,stroke-width:2px
-    style Usage fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
-```
-
 ## 핵심 구성요소
 
 ### 1. Sparse Pixel Transformer
@@ -291,24 +208,25 @@ flowchart TB
 -   **State Token Integration**: 게임 상태 벡터를 하나의 토큰으로 취급하여 Self-Attention에 직접 참여
 -   **CNN Refinement Head**: 최종 복원 품질 향상 (ResNet 블록 + Sigmoid)
 
-### 2. 서버 예측 오차 기반 픽셀 중요도 계산
+### 2. Attention Entropy 기반 중요도 계산
 
-서버는 복원 품질을 자체 평가하여 다음 프레임에 필요한 픽셀을 결정합니다:
+서버는 복원 과정에서 생성된 Attention 가중치의 엔트로피를 분석하여 중요도를 판단합니다:
 
--   **Monte Carlo Dropout**: 여러 dropout 패턴으로 불확실성 추정
--   **Attention 가중치 분석**: 정보 부족 영역 식별
--   **시간적 일관성 검사**: 프레임 간 불일치 영역 탐지
--   **종합 중요도 맵**: 가중 평균으로 최종 중요도 계산
+-   **Attention 가중치 추출**: 모델의 Cross-Attention Layer에서 가중치 획득
+-   **Shannon Entropy 계산**: 엔트로피가 높은(불확실한) 영역 식별
+-   **Importance Map 생성**: 엔트로피를 정규화하여 픽셀별 샘플링 확률 결정
 
 ### 3. 데이터 클리닝 파이프라인 (Data Cleaning)
 
 학습 전, 수집된 raw 데이터의 품질을 보장하고 데이터 불균형을 해소하기 위해 3단계 클리닝 파이프라인을 거칩니다:
 
 1.  **기본 필터링 (Pre-filtering)**:
+
     -   최소 픽셀 수 미만의 프레임 제거 (정보 부족)
     -   비정상적인 상태 벡터를 가진 미사용(Padding only) 프레임 제거
 
 2.  **정적 구간 제거 (Stationarity Filtering)**:
+
     -   게임 세션 내 상태 벡터의 변화 속도(Velocity)를 계산
     -   움직임이 거의 없는(Threshold 이하) 정적인 구간(대기 화면, 로딩 등)을 제거하여 학습 효율 증대 ('Smart Thresholding' 적용)
 
@@ -317,50 +235,35 @@ flowchart TB
     -   과도하게 많은 샘플이 포함된 클러스터(예: 단순 이동 중)에서 데이터를 Downsampling
     -   희귀한 상태(전투, 특수 이벤트 등)는 최대한 보존하여 데이터 분포를 균일하게 조정
 
-### 4. 계층적 샘플링 예산 할당
 
-```
-Critical (10%): 크로스헤어, 적 위치 등 게임플레이 핵심 요소
-Important (20%): 캐릭터, 주요 객체
-Moderate (30%): 환경 디테일
-Optional (40%): 배경, 장식 요소
-```
-
-### 4. 적응적 지연 보상
-
-네트워크 지연을 고려한 예측 시스템:
-
--   실시간 지연 측정
--   2-5 프레임 미래 예측
--   모션 벡터 기반 픽셀 궤적 추정
 
 ## 학습 전략
 
 ### Masked Sparse Modeling 전략
 
-SGAPS는 단순한 Autoencoder가 아닌, 희소 입력으로부터 전체 구조를 추론하는 **Masked Sparse Modeling** 접근 방식을 취합니다.
+SGAPS는 희소 입력으로부터 전체 구조를 추론하는 **Masked Sparse Modeling** 접근 방식을 취합니다.
 
 ```mermaid
 flowchart LR
     input_pixels[입력 픽셀\n(Sparse Pixels)]
     mask[Random Masking]
     masked_input[Masked Input\n(Subset)]
-    
+
     subgraph Model["SGAPS Model"]
         encoder[Encoder\n(w/ State Token)]
         decoder[Decoder]
     end
-    
+
     reconstruction[복원 이미지]
     target[전체 프레임 / 원본 픽셀]
-    
+
     input_pixels --> mask
     mask --> masked_input
     masked_input --> Model
     Model --> reconstruction
-    
+
     reconstruction <-->|Loss| target
-    
+
     style mask fill:#ffcdd2,stroke:#c62828
     style Model fill:#bbdefb,stroke:#1565c0
 ```
@@ -371,49 +274,13 @@ flowchart LR
 
 이 전략은 모델이 단순히 주어진 픽셀을 보간(Interpolation)하는 것을 넘어, **게임 상태와 픽셀 간의 의미론적 관계**를 이해하도록 강제합니다.
 
-### 손실 함수 구성
-
 ```
-L_total = 0.3 × L_sampled + 0.4 × L_perceptual + 0.2 × L_structural + 0.1 × L_temporal
+L_total = L_sampled (MSE)
 ```
 
--   **L_sampled**: 샘플링된 픽셀의 직접 손실 (정보량 역가중치)
--   **L_perceptual**: 비샘플링 영역의 지각적 손실 (LPIPS)
--   **L_structural**: 구조적 일관성 (SSIM)
--   **L_temporal**: 시간적 평활성
+-   **L_sampled**: 샘플링된 픽셀 위치에서의 Mean Squared Error (MSE)
+    -   모델이 주어진 희소 픽셀 정보를 정확히 보존하도록 강제하며, 이를 바탕으로 주변 픽셀을 추론하게 합니다.
 
-## 성능 벤치마크
-
-### 시스템 성능
-
-| 지표            | 값        | 비고             |
-| --------------- | --------- | ---------------- |
-| **클라이언트**  |           |                  |
-| CPU 사용률      | 0.1%      | 단순 배열 접근만 |
-| 메모리 사용     | 10MB      | 프레임 버퍼만    |
-| GPU 요구사항    | 없음      | CPU만으로 동작   |
-| 배터리 소모     | 무시 가능 | 모바일 최적화    |
-| **네트워크**    |           |                  |
-| 상행 대역폭     | 60KB/s    | @30fps           |
-| 하행 대역폭     | 15KB/s    | @30fps           |
-| 총 대역폭       | 75KB/s    | 일반 넷코드 수준 |
-| **복원 품질**   |           |                  |
-| PSNR            | 39.2 dB   | 우수             |
-| SSIM            | 0.95      | 높은 유사성      |
-| 샘플링 비율     | 0.5-2%    | 250-1000 pixels  |
-| **서버 확장성** |           |                  |
-| 동시 세션       | 10,000+   | 단일 서버        |
-| GPU 메모리/세션 | 40MB      | 효율적           |
-| 처리 지연       | 5-10ms    | 실시간           |
-
-### 기존 방법과의 비교
-
-| 방법          | 샘플링률   | 대역폭     | 클라이언트 부하 | PSNR       |
-| ------------- | ---------- | ---------- | --------------- | ---------- |
-| Full Frame    | 100%       | 4.5MB/s    | 낮음            | -          |
-| Patch MAE     | 5-10%      | 150KB/s    | 높음 (GPU 필요) | 35dB       |
-| Pixel MAE     | 2%         | 90KB/s     | 중간            | 38dB       |
-| **SGAPS-MAE** | **0.5-2%** | **75KB/s** | **매우 낮음**   | **39.2dB** |
 
 ## 프로젝트 구조
 
