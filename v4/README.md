@@ -245,17 +245,17 @@ SGAPS는 희소 입력으로부터 전체 구조를 추론하는 **Masked Sparse
 
 ```mermaid
 flowchart LR
-    input_pixels[입력 픽셀\n(Sparse Pixels)]
-    mask[Random Masking]
-    masked_input[Masked Input\n(Subset)]
+    input_pixels["입력 픽셀\n(Sparse Pixels)"]
+    mask["Random Masking"]
+    masked_input["Masked Input\n(Subset)"]
 
     subgraph Model["SGAPS Model"]
-        encoder[Encoder\n(w/ State Token)]
-        decoder[Decoder]
+        encoder["Encoder\n(w/ State Token)"]
+        decoder["Decoder"]
     end
 
-    reconstruction[복원 이미지]
-    target[전체 프레임 / 원본 픽셀]
+    reconstruction["복원 이미지"]
+    target["전체 프레임 / 원본 픽셀"]
 
     input_pixels --> mask
     mask --> masked_input
