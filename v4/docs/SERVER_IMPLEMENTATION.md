@@ -45,6 +45,7 @@ sgaps-server/
 │   │   ├── __init__.py
 │   │   ├── dataset.py        # PyTorch Dataset
 │   │   ├── storage.py        # HDF5 저장
+│   │   ├── cleaner.py        # 데이터 클리닝
 │   │   └── transforms.py     # 데이터 증강
 │   ├── training/              # 학습 파이프라인
 │   │   ├── __init__.py
@@ -372,60 +373,63 @@ class SparsePixelTransformer(nn.Module):
         self.pos_encoder = ContinuousPositionalEncoding(self.embed_dim)
 
         # 4. Sparse Transformer Encoder
+        # 4. Sparse Transformer Encoder (Pre-LN enabled)
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=self.embed_dim,
             nhead=self.num_heads,
-            dim_feedforward=1024,
-            dropout=0.1,
-            batch_first=True
+            dim_feedforward=config.model.architecture.feedforward_dim,
+            dropout=config.model.architecture.dropout,
+            batch_first=True,
+            norm_first=True  # Optimization: Pre-LN
         )
         self.encoder = nn.TransformerEncoder(
             encoder_layer,
             num_layers=self.num_encoder_layers
         )
 
-        # 5. State-Pixel Cross-Attention (상태 벡터와 픽셀 특징 결합)
-        self.state_pixel_attention = nn.MultiheadAttention(
-            embed_dim=self.embed_dim,
-            num_heads=self.num_heads,
-            batch_first=True
-        )
+        # 5. Skip Connection (Optional)
+        if self.skip_enabled:
+            self.skip_proj = nn.Sequential(
+                nn.Linear(self.embed_dim, self.embed_dim),
+                nn.Dropout(config.model.architecture.skip.dropout),
+                nn.LayerNorm(self.embed_dim)
+            )
 
         # 6. Cross-Attention Decoder
         decoder_layer = nn.TransformerDecoderLayer(
             d_model=self.embed_dim,
             nhead=self.num_heads,
-            dim_feedforward=1024,
-            dropout=0.1,
-            batch_first=True
+            dim_feedforward=config.model.architecture.feedforward_dim,
+            dropout=config.model.architecture.dropout,
+            batch_first=True,
+            norm_first=True
         )
         self.decoder = nn.TransformerDecoder(
             decoder_layer,
             num_layers=self.num_decoder_layers
         )
 
-        # 7. CNN Refinement Head
+        # 7. CNN Refinement Head (ResNet-based + Sigmoid)
         self.refine_head = nn.Sequential(
-            nn.Conv2d(self.embed_dim, 128, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(128, 64, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(64, 1, kernel_size=3, padding=1),  # Grayscale
+            BasicBlock(self.embed_dim, self.embed_dim),
+            BasicBlock(self.embed_dim, self.embed_dim),
+            nn.Conv2d(self.embed_dim, 1, kernel_size=3, padding=1),
             nn.Sigmoid()
         )
 
-        # 학습 가능한 query 좌표 임베딩
         self.register_buffer('query_grid', None)
 
     def _generate_query_grid(self, batch_size, height, width, device):
-        """전체 프레임의 각 픽셀 위치를 query로 생성"""
-        if self.query_grid is None or self.query_grid.shape[1] != height * width:
+        """전체 프레임의 각 픽셀 위치를 query로 생성 (캐싱 사용)"""
+        # 해상도 변경 시 또는 초기화 시 그리드 생성
+        if self.query_grid is None or self.query_grid.shape[0] != height * width:
             y_coords = torch.linspace(0, 1, height, device=device)
             x_coords = torch.linspace(0, 1, width, device=device)
             yy, xx = torch.meshgrid(y_coords, x_coords, indexing='ij')
-            grid = torch.stack([xx.flatten(), yy.flatten()], dim=1)
+            grid = torch.stack([xx.flatten(), yy.flatten()], dim=1) # [H*W, 2]
             self.query_grid = grid
 
+        # 배치 크기만큼 확장
         return self.query_grid.unsqueeze(0).repeat(batch_size, 1, 1)
 
     def forward(self, sparse_pixels, state_vector, state_mask, resolution):
@@ -443,46 +447,61 @@ class SparsePixelTransformer(nn.Module):
         H, W = resolution
         device = sparse_pixels.device
 
-        # 1. Pixel Embedding
-        pixel_embeds = self.pixel_embed(sparse_pixels)  # [B, N, embed_dim]
+        # 1. Pixel Embedding: [B, N, embed_dim]
+        pixel_embeds = self.pixel_embed(sparse_pixels)
 
         # 2. Positional Encoding (UV 좌표 기반)
-        uv_coords = sparse_pixels[:, :, :2]  # [B, N, 2]
+        uv_coords = sparse_pixels[:, :, :2]
         pixel_embeds = self.pos_encoder(pixel_embeds, uv_coords)
 
-        # 3. State Vector Encoding (마스킹 적용)
-        state_embeds = self.state_encoder(state_vector, state_mask)  # [B, 1, embed_dim]
+        # 3. State Vector Encoding: [B, 1, embed_dim]
+        state_embeds = self.state_encoder(state_vector, state_mask)
 
-        # 4. Encoder: 희소 픽셀 간 관계 학습
-        encoded = self.encoder(pixel_embeds)  # [B, N, embed_dim]
+        # 4. State Token Integration
+        # 상태 벡터를 'Global Context Token'으로 취급하여 픽셀 시퀀스 앞에 붙임
+        # encoder_input: [B, N+1, embed_dim]
+        encoder_input = torch.cat([state_embeds, pixel_embeds], dim=1)
 
-        # 5. State-Pixel Cross-Attention (상태 벡터가 Query, 픽셀이 Key/Value)
-        state_conditioned, _ = self.state_pixel_attention(
-            query=state_embeds,
-            key=encoded,
-            value=encoded
-        )  # [B, 1, embed_dim]
+        # 5. Sparse Transformer Encoder (Self-Attention)
+        # 픽셀들은 서로의 정보뿐만 아니라 State Token도 함께 참조함
+        encoded_full = self.encoder(encoder_input)  # [B, N+1, embed_dim]
+        
+        # Memory for Decoder (State + Pixels)
+        memory = encoded_full
 
-        # 상태 정보를 모든 픽셀 임베딩에 broadcast하여 결합
-        encoded = encoded + state_conditioned.expand(-1, N, -1)  # [B, N, embed_dim]
+        # 6. Skip Connection (Optional)
+        encoded_avg_proj = None
+        if self.skip_enabled:
+             # 픽셀 부분만 평균 내어 Global Context로 사용
+             encoded_pixels = encoded_full[:, 1:, :] 
+             encoded_avg = encoded_pixels.mean(dim=1, keepdim=True)
+             encoded_avg_proj = self.skip_proj(encoded_avg)
 
-        # 6. Query 생성: 전체 프레임의 각 픽셀 위치
-        query_positions = self._generate_query_grid(B, H, W, device)  # [B, H*W, 2]
+        # 7. Query 생성: 전체 프레임의 각 픽셀 위치 [B, H*W, 2]
+        query_positions = self._generate_query_grid(B, H, W, device)
 
-        # Query 임베딩 초기화 (위치 정보만)
+        # 8. Query 임베딩 초기화 (위치 정보만)
         query_embeds = torch.zeros(B, H * W, self.embed_dim, device=device)
         query_embeds = self.pos_encoder(query_embeds, query_positions)
 
-        # 7. Decoder: Cross-attention으로 각 위치의 값 예측
-        decoded = self.decoder(query_embeds, encoded)  # [B, H*W, embed_dim]
+        # 9. Decoder: Cross-Attention
+        # Query(전체 위치)가 Key/Value(Encoded Memory)를 참조
+        decoded = self.decoder(
+            tgt=query_embeds, 
+            memory=memory
+        )  # [B, H*W, embed_dim]
 
-        # 8. Reshape → [B, H, W, embed_dim]
+        # Skip Connection Injection
+        if self.skip_enabled:
+            decoded = decoded + self.config.model.architecture.skip.weight * encoded_avg_proj.expand(-1, decoded.shape[1], -1)
+
+        # 10. Reshape → [B, H, W, embed_dim]
         decoded = decoded.view(B, H, W, self.embed_dim)
 
-        # 9. Channel-first → [B, embed_dim, H, W]
+        # 11. Channel-first → [B, embed_dim, H, W]
         decoded = decoded.permute(0, 3, 1, 2)
 
-        # 10. CNN Refinement
+        # 12. CNN Refinement
         output = self.refine_head(decoded)  # [B, 1, H, W]
 
         return output
@@ -668,65 +687,22 @@ import numpy as np
 
 class FrameReconstructor:
     """희소 픽셀 + 상태 벡터 → 전체 프레임 재구성"""
+    # ... (Implementation details)
+```
 
-    def __init__(self, config):
-        self.config = config
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.max_state_dim = config.model.max_state_dim
-        self.sentinel_value = config.model.sentinel_value
+### 3.2 Data Cleaning & Balancing
 
-        # 체크포인트 키 기반 모델 관리
-        self.checkpoint_manager = CheckpointManager(
-            checkpoint_dir=config.checkpoint_dir,
-            config=config
-        )
+학습 데이터의 품질과 균형을 위한 클리닝 파이프라인(`sgaps/data/cleaner.py`)입니다.
 
-    def load_checkpoint(self, checkpoint_key: str) -> bool:
-        """체크포인트 키에 해당하는 모델 로드"""
-        return self.checkpoint_manager.load_model(checkpoint_key)
+1.  **Stationarity Logic (정적 구간 제거)**:
+    -   상태 벡터의 속도(Velocity)를 계산하여 변화가 거의 없는 정적 프레임을 제거합니다.
+    -   'Smart Thresholding'을 통해 데이터 분포에 따른 동적 임계값을 적용합니다.
 
-    async def reconstruct(self, sparse_pixels, state_vector, resolution, checkpoint_key="default"):
-        """
-        Args:
-            sparse_pixels: np.ndarray [N, 3] (u, v, value)
-            state_vector: np.ndarray [max_state_dim] (고정 길이, sentinel 포함)
-            resolution: (height, width)
-            checkpoint_key: str - 모델 식별자
+2.  **Balancing Logic (K-Means Clustering)**:
+    -   상태 벡터를 특징으로 하여 K-Means 클러스터링을 수행합니다.
+    -   특정 클러스터에 데이터가 편중되는 것을 방지하기 위해 Downsampling을 수행합니다.
 
-        Returns:
-            reconstructed_frame: np.ndarray [H, W] (grayscale)
-        """
-        # 모델 가져오기
-        model = self.checkpoint_manager.get_model(checkpoint_key)
-
-        # NumPy → Torch Tensor
-        sparse_pixels_tensor = torch.from_numpy(sparse_pixels).float()
-        sparse_pixels_tensor = sparse_pixels_tensor.unsqueeze(0)  # [1, N, 3]
-        sparse_pixels_tensor = sparse_pixels_tensor.to(self.device)
-
-        # 상태 벡터 텐서 변환
-        state_tensor = torch.from_numpy(state_vector).float()
-        state_tensor = state_tensor.unsqueeze(0)  # [1, max_state_dim]
-        state_tensor = state_tensor.to(self.device)
-
-        # 상태 마스크 생성
-        state_mask = (state_tensor != self.sentinel_value).float()
-
-        # 추론
-        with torch.no_grad():
-            with torch.cuda.amp.autocast():  # Mixed Precision
-                output = model(sparse_pixels_tensor, state_tensor, state_mask, resolution)
-
-        # Tensor → NumPy
-        reconstructed = output.squeeze(0).squeeze(0).cpu().numpy()  # [H, W]
-        reconstructed = (reconstructed * 255).astype(np.uint8)
-
-        return reconstructed
-
-
-class CheckpointManager:
-    """체크포인트 키 기반 모델 관리"""
-
+### 3.3 Checkpoint Manager
     def __init__(self, checkpoint_dir: str, config):
         from pathlib import Path
 

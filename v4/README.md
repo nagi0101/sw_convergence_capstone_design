@@ -144,36 +144,35 @@ graph TB
         PosEnc["Continuous Positional<br/>Encoding"]
         StateEnc["StateVectorEncoder<br/>(masked)"]
         PixelWithPos["Pixel + Position<br/>[N, embed_dim]"]
-        StateEmbeds["State Embeds<br/>[1, embed_dim]"]
+        StateEmbeds["State Token<br/>[1, embed_dim]"]
+    end
+
+    subgraph Integration["State Token Integration"]
+        Concat["Concatenate<br/>[State Token; Pixels]"]
+        TokenizedInput["Tokenized Sequence<br/>[N+1, embed_dim]"]
     end
 
     subgraph TransformerEncoder["Sparse Transformer Encoder"]
         SelfAttn["Self-Attention Layers<br/>(num_encoder_layers)"]
-        Encoded["Encoded Features<br/>[N, embed_dim]"]
-    end
-
-    subgraph StateFusion["State-Pixel Fusion"]
-        StatePixelAttn["State-Pixel Cross-Attention<br/>Q: State, K/V: Encoded"]
-        Broadcast["Broadcast State Info<br/>to All Pixels"]
-        EncodedWithState["State-Conditioned<br/>Features [N, embed_dim]"]
+        Encoded["Encoded Memory<br/>[N+1, embed_dim]"]
     end
 
     subgraph SkipConnection["Skip Connection (Optional)"]
         SkipProj["Skip Projection<br/>Linear + Dropout + LayerNorm"]
-        EncodedAvg["Global Context<br/>[1, embed_dim]"]
+        EncodedAvg["Global Context<br/>(from Pixels)"]
     end
 
     subgraph CrossAttentionDecoder["Cross-Attention Decoder"]
         QueryGrid["Query Grid<br/>[H×W, 2] UV coords"]
         QueryEmbed["Query Pos Encoding<br/>[H×W, embed_dim]"]
-        DecoderLayers["CrossAttentionDecoderLayer × 4<br/>(no self-attention)"]
+        DecoderLayers["CrossAttentionDecoderLayer × 4<br/>(Query: Grid, Key/Val: Memory)"]
         SkipAdd["+ Skip Connection<br/>(if enabled)"]
         Decoded["Decoded<br/>[H×W, embed_dim]"]
     end
 
     subgraph CNNHead["CNN Refinement Head"]
         Reshape["Reshape<br/>[H, W, embed_dim]"]
-        Conv["Conv Layers<br/>(configurable)"]
+        Conv["Conv Layers + Sigmoid<br/>(Grayscale Output)"]
         Output["Output<br/>[H, W, 1]"]
     end
 
@@ -184,21 +183,18 @@ graph TB
     StateMask --> StateEnc
     StateEnc --> StateEmbeds
 
-    PixelWithPos --> SelfAttn
+    StateEmbeds --> Concat
+    PixelWithPos --> Concat
+    Concat --> TokenizedInput
+    TokenizedInput --> SelfAttn
     SelfAttn --> Encoded
 
-    StateEmbeds --> StatePixelAttn
-    Encoded --> StatePixelAttn
-    StatePixelAttn --> Broadcast
-    Encoded --> Broadcast
-    Broadcast --> EncodedWithState
-
-    EncodedWithState --> EncodedAvg
+    Encoded --> EncodedAvg
     EncodedAvg --> SkipProj
 
     QueryGrid --> QueryEmbed
     QueryEmbed --> DecoderLayers
-    EncodedWithState --> DecoderLayers
+    Encoded --> DecoderLayers
     DecoderLayers --> SkipAdd
     SkipProj --> SkipAdd
     SkipAdd --> Decoded
@@ -208,8 +204,9 @@ graph TB
     Conv --> Output
 
     style Input fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
+    style Embedding fill:#fff9c4,stroke:#fbc02d,stroke-width:2px
     style TransformerEncoder fill:#f3e5f5,stroke:#4a148c,stroke-width:2px
-    style StateFusion fill:#fff9c4,stroke:#f57f17,stroke-width:2px
+    style Integration fill:#ffe0b2,stroke:#f57f17,stroke-width:2px
     style SkipConnection fill:#e1bee7,stroke:#6a1b9a,stroke-width:2px,stroke-dasharray: 5 5
     style CrossAttentionDecoder fill:#fff3e0,stroke:#ef6c00,stroke-width:2px
     style CNNHead fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
@@ -289,10 +286,10 @@ flowchart TB
 
 희소 픽셀 집합에서 전체 프레임을 복원하는 Transformer 기반 모델:
 
--   **Self-Attention Encoder**: 희소 픽셀 간의 관계 학습 (O(N²) 복잡도, N은 작아 효율적)
--   **Cross-Attention Decoder**: Query Grid로 전체 프레임 위치 복원
--   **State-Pixel Cross-Attention**: 게임 상태와 픽셀 특징 결합
--   **CNN Refinement Head**: 최종 복원 품질 향상
+-   **Self-Attention Encoder**: 희소 픽셀 간의 관계 학습 (State Token이 포함되어 전역 컨텍스트 공유)
+-   **Cross-Attention Decoder**: Query Grid(전체 픽셀 위치)가 Encoder Memory(State+Pixels)를 참조하여 복원
+-   **State Token Integration**: 게임 상태 벡터를 하나의 토큰으로 취급하여 Self-Attention에 직접 참여
+-   **CNN Refinement Head**: 최종 복원 품질 향상 (ResNet 블록 + Sigmoid)
 
 ### 2. 서버 예측 오차 기반 픽셀 중요도 계산
 
@@ -303,7 +300,24 @@ flowchart TB
 -   **시간적 일관성 검사**: 프레임 간 불일치 영역 탐지
 -   **종합 중요도 맵**: 가중 평균으로 최종 중요도 계산
 
-### 3. 계층적 샘플링 예산 할당
+### 3. 데이터 클리닝 파이프라인 (Data Cleaning)
+
+학습 전, 수집된 raw 데이터의 품질을 보장하고 데이터 불균형을 해소하기 위해 3단계 클리닝 파이프라인을 거칩니다:
+
+1.  **기본 필터링 (Pre-filtering)**:
+    -   최소 픽셀 수 미만의 프레임 제거 (정보 부족)
+    -   비정상적인 상태 벡터를 가진 미사용(Padding only) 프레임 제거
+
+2.  **정적 구간 제거 (Stationarity Filtering)**:
+    -   게임 세션 내 상태 벡터의 변화 속도(Velocity)를 계산
+    -   움직임이 거의 없는(Threshold 이하) 정적인 구간(대기 화면, 로딩 등)을 제거하여 학습 효율 증대 ('Smart Thresholding' 적용)
+
+3.  **데이터 균형화 (Balancing via Clustering)**:
+    -   상태 벡터(State Vector)를 기반으로 **K-Means Clustering** 수행
+    -   과도하게 많은 샘플이 포함된 클러스터(예: 단순 이동 중)에서 데이터를 Downsampling
+    -   희귀한 상태(전투, 특수 이벤트 등)는 최대한 보존하여 데이터 분포를 균일하게 조정
+
+### 4. 계층적 샘플링 예산 할당
 
 ```
 Critical (10%): 크로스헤어, 적 위치 등 게임플레이 핵심 요소
@@ -322,35 +336,40 @@ Optional (40%): 배경, 장식 요소
 
 ## 학습 전략
 
-### 커리큘럼 학습 단계
+### Masked Sparse Modeling 전략
+
+SGAPS는 단순한 Autoencoder가 아닌, 희소 입력으로부터 전체 구조를 추론하는 **Masked Sparse Modeling** 접근 방식을 취합니다.
 
 ```mermaid
-graph LR
-    subgraph Phase1["Phase 1 (Epochs 1-100)"]
-        P1_Strategy["전략: Uniform<br/>샘플률: 10%<br/>목표: 전역 구조"]
+flowchart LR
+    input_pixels[입력 픽셀\n(Sparse Pixels)]
+    mask[Random Masking]
+    masked_input[Masked Input\n(Subset)]
+    
+    subgraph Model["SGAPS Model"]
+        encoder[Encoder\n(w/ State Token)]
+        decoder[Decoder]
     end
-
-    subgraph Phase2["Phase 2 (Epochs 101-300)"]
-        P2_Strategy["전략: Edge-focused<br/>샘플률: 5%<br/>목표: 경계선"]
-    end
-
-    subgraph Phase3["Phase 3 (Epochs 301-500)"]
-        P3_Strategy["전략: Hard negative<br/>샘플률: 2%<br/>목표: 고오차 영역"]
-    end
-
-    subgraph Phase4["Phase 4 (Epochs 501+)"]
-        P4_Strategy["전략: Extreme sparse<br/>샘플률: 0.5%<br/>목표: 핵심만"]
-    end
-
-    Phase1 --> Phase2
-    Phase2 --> Phase3
-    Phase3 --> Phase4
-
-    style Phase1 fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
-    style Phase2 fill:#fff3e0,stroke:#ef6c00,stroke-width:2px
-    style Phase3 fill:#f3e5f5,stroke:#4a148c,stroke-width:2px
-    style Phase4 fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
+    
+    reconstruction[복원 이미지]
+    target[전체 프레임 / 원본 픽셀]
+    
+    input_pixels --> mask
+    mask --> masked_input
+    masked_input --> Model
+    Model --> reconstruction
+    
+    reconstruction <-->|Loss| target
+    
+    style mask fill:#ffcdd2,stroke:#c62828
+    style Model fill:#bbdefb,stroke:#1565c0
 ```
+
+1.  **Masking**: 학습 시 입력 희소 픽셀의 일부를 무작위로 제거(Masking)하여 모델에 입력합니다.
+2.  **State Context**: 모델은 생략된 픽셀 정보를 보완하기 위해 **게임 상태 벡터(State Token)**와 남은 픽셀들의 관계를 활용해야 합니다.
+3.  **Generative Reconstruction**: 손실 함수는 마스킹된 부분을 포함한 전체 구조의 복원 품질을 평가합니다.
+
+이 전략은 모델이 단순히 주어진 픽셀을 보간(Interpolation)하는 것을 넘어, **게임 상태와 픽셀 간의 의미론적 관계**를 이해하도록 강제합니다.
 
 ### 손실 함수 구성
 
