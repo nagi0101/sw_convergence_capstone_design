@@ -157,6 +157,18 @@ class DataBalancer:
         else:
             features = data_norm
 
+        N = features.size(0)
+        if N < self.n_clusters:
+            print(f"Warning: Not enough samples for balancing ({N} < {self.n_clusters}). Skipping.")
+            stats = {
+                "n_clusters": 0,
+                "original_counts": {},
+                "kept_counts": {}
+            }
+            # Return indices sorted
+            sorted_indices, _ = passed_indices.sort()
+            return sorted_indices.tolist(), stats
+
         # 3. Run K-Means
         print(f"Running K-Means (k={self.n_clusters})...")
         labels, _ = self._kmeans(features, self.n_clusters)
@@ -183,6 +195,13 @@ class DataBalancer:
         generator = torch.Generator()
         generator.manual_seed(self.seed)
 
+        # Capture stats for visualization
+        stats = {
+            "n_clusters": self.n_clusters,
+            "original_counts": {int(k): int(c) for k, c in zip(unique_labels, counts)},
+            "kept_counts": {}
+        }
+
         # Iterate over clusters and select indices (relative to passed_indices)
         for k in range(self.n_clusters):
             # Get indices belonging to cluster k
@@ -190,6 +209,7 @@ class DataBalancer:
             num_samples = len(cluster_indices)
             
             if num_samples == 0:
+                stats["kept_counts"][k] = 0
                 continue
                 
             if num_samples > cap_limit:
@@ -197,9 +217,11 @@ class DataBalancer:
                 perm = torch.randperm(num_samples, generator=generator)
                 selected = cluster_indices[perm[:cap_limit]]
                 indices_to_keep_local.extend(selected.tolist())
+                stats["kept_counts"][k] = len(selected)
             else:
                 # Keep all
                 indices_to_keep_local.extend(cluster_indices.tolist())
+                stats["kept_counts"][k] = len(cluster_indices)
                 
         # 4. Map back to original indices
         # indices_to_keep_local are indices into passed_indices
@@ -214,4 +236,107 @@ class DataBalancer:
               f"({(1 - len(indices_to_keep)/N_total)*100:.1f}% reduction). "
               f"Pre-filter kept {len(passed_indices)}.")
               
-        return indices_to_keep
+        return indices_to_keep, stats
+
+class VelocityCalculator:
+    """
+    Helper to compute velocity statistics for sessions.
+    """
+    @staticmethod
+    def compute_velocities(states: np.ndarray) -> np.ndarray:
+        """
+        Computes velocity magnitude for a sequence of states.
+        Args:
+            states: [T, D] numpy array
+        Returns:
+            velocities: [T-1] numpy array
+        """
+        if len(states) < 2:
+            return np.array([])
+        diffs = states[1:] - states[:-1]
+        vels = np.linalg.norm(diffs, axis=1) + 1e-9
+        return vels
+
+class StationarityFilter:
+    """
+    Filters out stationary sessions based on velocity distribution.
+    Implements 'Smart Thresholding' (Ratio-based with Noise Floor).
+    """
+    def __init__(self, config: DictConfig):
+        self.config = config
+        self.enabled = config.cleaning.get('enabled', False)
+        # Default ratio 0.1, but check if user provided it
+        self.ratio = config.cleaning.get('stationarity_threshold', 0.1)
+        # Fixed noise floor to handle low-energy datasets
+        self.noise_floor = config.cleaning.get('noise_floor', 0.15) 
+
+    def filter_sessions(self, session_data: List[dict]) -> Tuple[List[int], dict]:
+        """
+        Args:
+            session_data: List of dicts, each containing:
+                - 'id': session identifier
+                - 'states': np.ndarray [T, D]
+        Returns:
+            keep_indices: List of indices in session_data to keep.
+            stats: Dictionary of filtering statistics.
+        """
+        if not self.enabled:
+            return list(range(len(session_data))), {}
+
+        print(f"Running Stationarity Filter on {len(session_data)} sessions...")
+        
+        # 1. Compute velocities map
+        session_stats = []
+        all_velocities = []
+        
+        for i, sess in enumerate(session_data):
+            vels = VelocityCalculator.compute_velocities(sess['states'])
+            if len(vels) == 0:
+                median_vel = 0.0
+            else:
+                median_vel = np.median(vels)
+                all_velocities.extend(vels)
+            
+            session_stats.append({
+                "index": i,
+                "median_vel": median_vel
+            })
+            
+        # 2. Global Statistics
+        if not all_velocities:
+            print("Warning: No velocities found in data.")
+            return list(range(len(session_data))), {}
+            
+        global_median = np.median(all_velocities)
+        
+        # 3. Determine Threshold (Smart Logic)
+        calculated_thresh = global_median * self.ratio
+        
+        # If global median is very low, the dataset is mostly static, so relative threshold is dangerous.
+        # Use noise_floor to ensure we cut out the absolute stillness.
+        threshold = max(calculated_thresh, self.noise_floor)
+        
+        if global_median < 0.2:
+            print(f"  [Smart Filter] Global Median ({global_median:.4f}) is low. Enforcing Noise Floor: {self.noise_floor}")
+        
+        # 4. Filter
+        keep_indices = []
+        removed_count = 0
+        
+        for s in session_stats:
+            if s['median_vel'] >= threshold:
+                keep_indices.append(s['index'])
+            else:
+                removed_count += 1
+                
+        stats = {
+            "global_median": global_median,
+            "threshold": threshold,
+            "removed_sessions": removed_count,
+            "total_sessions": len(session_data)
+        }
+        
+        print(f"  Stationarity Filter Removed {removed_count}/{len(session_data)} sessions (Threshold: {threshold:.4f}).")
+        
+        return keep_indices, stats
+

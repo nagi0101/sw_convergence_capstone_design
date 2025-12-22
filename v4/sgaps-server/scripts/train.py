@@ -37,6 +37,10 @@ def collate_fn(batch):
 
     # Pad sparse_pixels (variable length N)
     sparse_pixels_padded = rnn_utils.pad_sequence(sparse_pixels, batch_first=True, padding_value=0)
+    
+    # Pad masked_pixels (variable length M)
+    masked_pixels = [item['masked_pixels'] for item in batch]
+    masked_pixels_padded = rnn_utils.pad_sequence(masked_pixels, batch_first=True, padding_value=0)
 
     # Stack other tensors
     gt_frames_stacked = torch.stack(gt_frames)
@@ -47,6 +51,7 @@ def collate_fn(batch):
 
     return {
         'sparse_pixels': sparse_pixels_padded,
+        'masked_pixels': masked_pixels_padded,
         'gt_frame': gt_frames_stacked,
         'state_vector': state_vectors_stacked,
         'state_mask': state_masks_stacked,
@@ -90,6 +95,14 @@ def main(cfg: DictConfig) -> None:
     print("Initializing model...")
     model = SparsePixelTransformer(cfg)
     
+    # Optimization: torch.compile
+    if getattr(cfg.training, 'compile', False):
+        print("Compiling model with torch.compile...")
+        try:
+            model = torch.compile(model)
+        except Exception as e:
+            print(f"Warning: torch.compile failed: {e}. Proceeding with eager mode.")
+    
     # 4. Initialize Datasets and DataLoaders
     print("Initializing datasets...")
     
@@ -127,23 +140,77 @@ def main(cfg: DictConfig) -> None:
     train_dataset, val_dataset = torch.utils.data.random_split(full_dataset, [train_size, val_size], generator=generator)
     
     print(f"Splitting dataset: {train_size} for training, {val_size} for validation.")
+    try:
+        res = cfg.data.resolution
+        print(f"!!! INFO: Data Resolution: {res} (Pixels: {res[0]*res[1]}) !!!")
+    except:
+        print("!!! WARNING: Could not determine resolution from config !!!")
 
-    train_loader = torch.utils.data.DataLoader(
-        train_dataset,
-        batch_size=cfg.training.batch_size,
-        shuffle=True,
-        num_workers=cfg.training.num_workers,
-        collate_fn=collate_fn,
-        pin_memory=True
-    )
-    val_loader = torch.utils.data.DataLoader(
-        val_dataset,
-        batch_size=cfg.training.batch_size,
-        shuffle=False,
-        num_workers=cfg.training.num_workers,
-        collate_fn=collate_fn,
-        pin_memory=True
-    )
+    # 4.5 Log Preprocessing Visualizations to WandB
+    if cfg.logging.type == "wandb" and 'wandb' in sys.modules:
+        if hasattr(full_dataset, 'cleaning_figures') and full_dataset.cleaning_figures:
+            print("Logging preprocessing visualizations to WandB...")
+            viz_log = {}
+            for name, fig in full_dataset.cleaning_figures.items():
+                viz_log[f"preprocessing/{name}"] = wandb.Image(fig)
+            
+            wandb.log(viz_log)
+            # Close figures to free memory
+            import matplotlib.pyplot as plt
+            for fig in full_dataset.cleaning_figures.values():
+                plt.close(fig)
+
+    # Create DataLoaders
+    # Sampler Logic
+    train_sampler = None
+    train_shuffle = True
+    train_batch_sampler = None
+
+    val_sampler = None
+    val_shuffle = False
+    
+    sampler_type = getattr(cfg.training, 'sampler', {}).get('type', 'random')
+    if sampler_type == 'sorted':
+        print("Using SortedBatchSampler for efficient training...")
+        from sgaps.data.sampler import SortedBatchSampler
+        # Note: batch_sampler is mutually exclusive with batch_size, shuffle, sampler, and drop_last
+        train_batch_sampler = SortedBatchSampler(train_dataset, batch_size=cfg.training.batch_size, drop_last=False)
+        train_shuffle = False # Handled inside batch_sampler
+        
+        # Validation can also benefit from sorted sampling to speed up evaluation
+        # But usually validation order doesn't matter much. Let's apply it for consistency and speed.
+        val_batch_sampler = SortedBatchSampler(val_dataset, batch_size=cfg.training.batch_size, drop_last=False)
+    else:
+        val_batch_sampler = None
+
+    # DataLoader arguments need to be adjusted based on whether batch_sampler is used
+    train_loader_kwargs = {
+        'num_workers': cfg.training.num_workers,
+        'collate_fn': collate_fn,
+        'pin_memory': True
+    }
+    
+    if train_batch_sampler:
+        train_loader_kwargs['batch_sampler'] = train_batch_sampler
+    else:
+        train_loader_kwargs['batch_size'] = cfg.training.batch_size
+        train_loader_kwargs['shuffle'] = True
+
+    train_loader = torch.utils.data.DataLoader(train_dataset, **train_loader_kwargs)
+
+    val_loader_kwargs = {
+        'num_workers': cfg.training.num_workers,
+        'collate_fn': collate_fn,
+        'pin_memory': True
+    }
+    
+    if val_batch_sampler:
+        val_loader_kwargs['batch_sampler'] = val_batch_sampler
+    else:
+        val_loader_kwargs['batch_size'] = cfg.training.batch_size
+        val_loader_kwargs['shuffle'] = False
+
+    val_loader = torch.utils.data.DataLoader(val_dataset, **val_loader_kwargs)
     print(f"Train dataset size: {len(train_dataset)}, Val dataset size: {len(val_dataset)}")
 
     # 5. Initialize Trainer

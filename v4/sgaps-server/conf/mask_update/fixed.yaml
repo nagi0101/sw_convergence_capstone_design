@@ -1,4 +1,0 @@
-# Fixed Mask Update Configuration
-
-strategy: "fixed"
-update_interval: 0 # 0 means never update (use initial pattern)

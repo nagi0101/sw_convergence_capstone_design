@@ -39,6 +39,27 @@ class StateVectorEncoder(nn.Module):
 
 
 
+class CapturingMultiheadAttention(nn.MultiheadAttention):
+    """
+    Custom subclass of MultiheadAttention to force need_weights=True 
+    and capture the resulting weights.
+    Used for the last decoder layer to enable importance map generation.
+    """
+    def forward(self, *args, **kwargs):
+        # Force calculation of weights
+        kwargs['need_weights'] = True
+
+        # Call original forward
+        # output is (attn_output, attn_output_weights)
+        outputs = super().forward(*args, **kwargs)
+
+        # Store weights for parent to read (pull pattern)
+        # outputs[1] is [B, NumHeads, TgtLen, SrcLen] or similar
+        self.stored_weights = outputs[1]
+
+        return outputs
+
+
 class SparsePixelTransformer(nn.Module):
     """
     Reconstructs a full image frame from a sparse set of pixels and a game state vector.
@@ -135,7 +156,6 @@ class SparsePixelTransformer(nn.Module):
         # Initialize weights
         self.apply(self._init_weights)
 
-        # Prevent Sigmoid saturation at the start:
         # Initialize the final Conv2d (before Sigmoid) to small values/zeros.
         # This ensures the model starts outputting neutral gray (0.5) instead of binary 0/1.
         final_conv = self.refine_head[2] # Index 2 is the Conv2d
@@ -143,6 +163,19 @@ class SparsePixelTransformer(nn.Module):
             nn.init.constant_(final_conv.weight, 0)
             nn.init.constant_(final_conv.bias, 0)
 
+        # Upgrade the last decoder layer's attention module to our capturing subclass
+        # This ensures need_weights=True is passed and we can access the result.
+        # This preserves state_dict compatibility because we only change the class wrapper,
+        # not the internal parameters.
+        if self.decoder.layers:
+            last_layer = self.decoder.layers[-1]
+            original_mha = last_layer.multihead_attn
+            
+            # Change class of the instance dynamically (Class Swizzling)
+            original_mha.__class__ = CapturingMultiheadAttention
+
+            # Initialize storage for attention weights (pull pattern)
+            original_mha.stored_weights = None
     def _init_weights(self, m):
         """
         ViT/BERT-style weight initialization.
@@ -317,11 +350,14 @@ class SparsePixelTransformer(nn.Module):
 
         # 12. Return
         if return_attention:
-            # Native TransformerDecoder doesn't easily return weights from forward()
-            # We would need to use hooks or access layers. 
-            # For now, return None for weights or implement a custom hook if strictly needed.
-            # Considering the complexity, we will return None for weights in this standard implementation.
-            return output, None
+            # Pull attention weights from the child module
+            if self.decoder.layers:
+                weights = self.decoder.layers[-1].multihead_attn.stored_weights
+                # Clear for next pass to save memory/prevent stale data
+                self.decoder.layers[-1].multihead_attn.stored_weights = None
+            else:
+                weights = None
+            return output, weights
         else:
             return output
 
@@ -330,8 +366,20 @@ class SparsePixelTransformer(nn.Module):
         """Loads a model from a saved checkpoint file."""
         model = SparsePixelTransformer(config)
         try:
-            checkpoint = torch.load(checkpoint_path, map_location='cpu')
-            model.load_state_dict(checkpoint['model_state_dict'])
+            checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+            state_dict = checkpoint['model_state_dict']
+
+            # Handle torch.compile() wrapper prefix
+            # If checkpoint was saved from a compiled model, strip _orig_mod. prefix
+            if any(key.startswith('_orig_mod.') for key in state_dict.keys()):
+                print("Detected torch.compile checkpoint. Stripping _orig_mod. prefix...")
+                state_dict = {
+                    key.replace('_orig_mod.', ''): value
+                    for key, value in state_dict.items()
+                    if not key == '_orig_mod.query_grid'  # Skip non-model attributes
+                }
+
+            model.load_state_dict(state_dict)
             print(f"Successfully loaded model from {checkpoint_path}")
         except FileNotFoundError:
             print(f"Warning: Checkpoint file not found at {checkpoint_path}. Initializing with random weights.")

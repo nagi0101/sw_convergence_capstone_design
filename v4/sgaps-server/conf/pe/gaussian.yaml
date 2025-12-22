@@ -1,5 +1,7 @@
-# Gaussian Fourier Features (Learnable RFF) configuration
-# Recommended for high-frequency detail learning
+# Gaussian Fourier Features (Learnable RFF)
 type: gaussian_fourier
-sigma: 10.0       # Initial bandwidth for Gaussian frequency sampling
+# Bandwidth for Gaussian sampling
+# Higher sigma = Higher frequencies = Better local detail (but less global structure)
+# Increased from 10.0 to 30.0 for "Local Relationship" learning
+sigma: 30.0       # Initial bandwidth for Gaussian frequency sampling
 learnable: true   # Whether frequency matrix is learnable

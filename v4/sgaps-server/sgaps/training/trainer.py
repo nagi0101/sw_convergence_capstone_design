@@ -72,7 +72,13 @@ class SGAPSTrainer:
             self.use_wandb = False
 
         # Track best score for checkpoint management
+        # Track best score for checkpoint management
         self.best_score = float('inf') if config.training.checkpoint.mode == 'min' else float('-inf')
+
+        # Optimization: Configurable intervals
+        # Visualization training config
+        self.viz_enabled = getattr(config.training.visualization, 'enabled', False)
+        self.viz_interval = getattr(config.training.visualization, 'log_every_n_frames', 100)
 
     def train_epoch(self, epoch: int):
         """
@@ -83,12 +89,17 @@ class SGAPSTrainer:
         progress = tqdm(self.train_loader, desc=f"Epoch {epoch+1}/{self.config.training.num_epochs} [Train]")
 
         for batch in progress:
-            sparse_pixels = batch["sparse_pixels"].to(self.device)
+            sparse_pixels = batch["sparse_pixels"].to(self.device) # Target: All pixels
+            # masked_pixels: Input subset (if masking enabled)
+            # If masked_pixels key exists, use it. Otherwise fallback to sparse_pixels.
+            masked_pixels = batch.get("masked_pixels", batch["sparse_pixels"]).to(self.device)
+            
             gt_frame = batch["gt_frame"].to(self.device)
             state_vector = batch["state_vector"].to(self.device)
             state_mask = batch["state_mask"].to(self.device)
             resolution = batch["resolution"].to(self.device)
-            num_pixels = batch["num_pixels"].to(self.device)
+            num_pixels = batch["num_pixels"].to(self.device) # Total count
+            num_input_pixels = batch.get("num_input_pixels", num_pixels).to(self.device) # Input count
 
             # Enforce FlashAttention for speed and memory efficiency
             # Fallback to mem_efficient if flash is not available, but avoid slow math kernel
@@ -99,11 +110,11 @@ class SGAPSTrainer:
                 
                 # Pass num_pixels to model to enable internal masking (Attn, Skip, etc.)
                 pred = self.model(
-                    sparse_pixels, 
+                    masked_pixels, # Use MASKED input
                     state_vector, 
                     state_mask, 
                     resolution_tuple,
-                    num_pixels=num_pixels
+                    num_pixels=num_input_pixels # Pass INPUT pixel count for accurate masking
                 )
                 
                 # Create pixel_padding_mask for loss function
@@ -115,8 +126,7 @@ class SGAPSTrainer:
                 if self.config.loss.type == "sampled_pixel_l2":
                     losses = self.criterion(pred, gt_frame, sparse_pixels[:, :, :2], pixel_padding_mask=pixel_padding_mask)
                 else:
-                     # For Full L2, we compare full prediction against full GT
-                    losses = {"total": self.criterion(pred, gt_frame)}
+                    raise ValueError(f"Unknown loss type: {self.config.loss.type}")
 
             self.optimizer.zero_grad()
             self.scaler.scale(losses["total"]).backward()
@@ -127,14 +137,19 @@ class SGAPSTrainer:
             progress.set_postfix(loss=losses["total"].item())
 
             if self.use_wandb and self.wandb:
-                self.wandb.log({
+                wandb_logs = {
                     "Train/loss_step": losses["total"].item(),
                     "Train/lr": self.optimizer.param_groups[0]["lr"]
-                })
+                }
+                # Log hidden loss if available (custom metric)
+                # Note: SampledPixelL2Loss returns a single scalar by default, 
+                # calculating split loss would require modifying the loss function or manual calc here.
+                # For now, we trust 'total' loss which naturally includes the hidden parts.
+                self.wandb.log(wandb_logs)
             
             # --- DEBUG VISUALIZATION ---
-            # Save debug images every 10 batches to verify data and model output
-            if progress.n % 50 == 0:
+            # Save debug images every N batches to verify data and model output
+            if self.viz_enabled and progress.n % self.viz_interval == 0:
                 step = progress.n
                 debug_dir = Path("debug_outputs") / f"epoch_{epoch}"
                 debug_dir.mkdir(parents=True, exist_ok=True)
@@ -285,8 +300,11 @@ class SGAPSTrainer:
 
         # Prepare checkpoint data, excluding dynamically generated buffers like 'query_grid'
         state_dict = self.model.state_dict()
+        # Handle both compiled and non-compiled models
         if 'query_grid' in state_dict:
             del state_dict['query_grid']
+        if '_orig_mod.query_grid' in state_dict:
+            del state_dict['_orig_mod.query_grid']
 
         checkpoint_data = {
             'epoch': epoch,

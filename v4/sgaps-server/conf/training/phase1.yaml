@@ -1,12 +1,19 @@
 # Phase 1: 기본 통신 및 학습 파이프라인 검증용 설정
 num_epochs: 50
-batch_size: 16
+batch_size: 26
 num_workers: 8 # 시스템 환경에 맞게 조절하세요. 0으로 설정하면 메인 프로세스에서 데이터를 로드합니다.
+
+# Sampler
+sampler:
+    type: sorted # 'random' or 'sorted'
+    
+# Optimization
+compile: true
 
 # Optimizer
 optimizer:
     type: adamw
-    learning_rate: 5.0e-5
+    learning_rate: 4.0e-4
     weight_decay: 0.01
     betas: [0.9, 0.999]
 
@@ -20,6 +27,19 @@ gradient_clip_norm: 0.5
 
 # Mixed Precision
 use_amp: true
+
+# Masking Strategy (Few-Shot / Inpainting)
+mask_ratio: 0.75
+
+# Data Augmentation (Repeated Sampling)
+augmentation:
+    enabled: true
+    repeats: 8
+
+# Visualization
+visualization:
+    enabled: true
+    log_every_n_frames: 100
 
 # Checkpoint
 checkpoint:

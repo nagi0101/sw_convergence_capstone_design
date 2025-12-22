@@ -4,9 +4,9 @@
 pattern: "hybrid"
 
 # Sample count constraints
-default_sample_count: 3000
+default_sample_count: 500
 min_sample_count: 250
-max_sample_count: 3000
+max_sample_count: 1000
 
 # Multi-strategy composition
 # Note: Current implementation uses importance + uniform (2 strategies)

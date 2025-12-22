@@ -187,17 +187,28 @@ class DebugVisualizer:
         ax.set_title(f"Sampled Pixels ({len(sampled_pixels)})", fontweight='bold', pad=8)
         ax.axis('off')
 
-    def _plot_heatmap(self, ax, heatmap: np.ndarray, title: str, cmap: str):
+    def _plot_heatmap(self, ax, heatmap: Optional[np.ndarray], title: str, cmap: str):
         """Plot a heatmap with colorbar."""
+        if heatmap is None:
+            ax.text(0.5, 0.5, "No Data", ha='center', va='center',
+                    transform=ax.transAxes, fontsize=14, color='gray')
+            ax.set_facecolor('#2a2a2a')
+            ax.set_title(title, fontweight='bold', pad=8)
+            ax.axis('off')
+            return
+
         # Handle potential NaN/Inf
         heatmap = np.nan_to_num(heatmap, nan=0.0, posinf=1.0, neginf=0.0)
         
         # Normalize to [0, 1]
-        hmin, hmax = heatmap.min(), heatmap.max()
-        if hmax - hmin > 1e-8:
-            heatmap_norm = (heatmap - hmin) / (hmax - hmin)
+        if heatmap.size > 0:
+            hmin, hmax = heatmap.min(), heatmap.max()
+            if hmax - hmin > 1e-8:
+                heatmap_norm = (heatmap - hmin) / (hmax - hmin)
+            else:
+                heatmap_norm = np.zeros_like(heatmap)
         else:
-            heatmap_norm = np.zeros_like(heatmap)
+            heatmap_norm = heatmap
         
         im = ax.imshow(heatmap_norm, cmap=cmap, vmin=0, vmax=1)
         ax.set_title(f"{title} (μ={heatmap.mean():.3f})", fontweight='bold', pad=8)

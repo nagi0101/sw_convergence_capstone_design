@@ -310,7 +310,7 @@ async def handle_frame_data(client_id: str, payload: dict):
         manager.global_wandb_step += 1
 
     # 1. Parse data into NumPy arrays
-    pixels = np.array([(p['u'], p['v'], p['value']) for p in payload.get("pixels", [])], dtype=np.float32)
+    pixels = np.array([(p['u'], p['v'], p['value'] / 255.0) for p in payload.get("pixels", [])], dtype=np.float32)
     state_vector = np.array(payload.get("state_vector", []), dtype=np.float32)
 
     # 1.5. Pad state vector to max_state_dim for model compatibility
@@ -413,7 +413,7 @@ async def handle_frame_data_debug(client_id: str, payload: dict):
     frame_id = payload.get("frame_id", 0)
 
     # --- Real-time processing (Reconstruction & Sampling) ---
-    pixels = np.array([(p['u'], p['v'], p['value']) for p in payload.get("pixels", [])], dtype=np.float32)
+    pixels = np.array([(p['u'], p['v'], p['value'] / 255.0) for p in payload.get("pixels", [])], dtype=np.float32)
     state_vector_raw = np.array(payload.get("state_vector", []), dtype=np.float32)
 
     sentinel_value = cfg.model.sentinel_value
