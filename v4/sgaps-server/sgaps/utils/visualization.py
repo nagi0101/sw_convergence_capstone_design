@@ -59,7 +59,8 @@ class DebugVisualizer:
         state_vector: np.ndarray,
         importance_map: np.ndarray,
         attention_weights: Optional[torch.Tensor] = None,
-        metadata: Optional[Dict] = None
+        metadata: Optional[Dict] = None,
+        best_metrics: Optional[Dict[str, float]] = None
     ) -> Image.Image:
         """
         Create 2x4 grid dashboard using matplotlib subplots.
@@ -67,7 +68,7 @@ class DebugVisualizer:
         
         Layout:
         [Original] [Reconstructed] [Difference] [Sampled Pixels]
-        [Importance] [Loss Map] [Attention] [State Vector]
+        [Importance] [Loss Map] [Metrics] [State Vector]
         """
         # Use lock to ensure thread safety for matplotlib operations
         with _matplotlib_lock:
@@ -120,7 +121,8 @@ class DebugVisualizer:
                 # Row 2: Analysis heatmaps
                 self._plot_heatmap(axes[1, 0], importance_map, "Importance Map", cmap)
                 self._plot_loss_map(axes[1, 1], original, reconstructed, cmap)
-                self._plot_attention(axes[1, 2], attention_weights, cmap)
+                # self._plot_attention(axes[1, 2], attention_weights, cmap) # Removed
+                self._plot_metrics_summary(axes[1, 2], meta, best_metrics) # New Text Panel
                 self._plot_state_vector(axes[1, 3], state_vector)
 
                 # Adjust layout with room for suptitle
@@ -141,6 +143,88 @@ class DebugVisualizer:
                 logger.error(f"Error creating dashboard: {e}", exc_info=True)
                 plt.close('all')
                 return self._create_error_image(str(e))
+                
+    def _plot_metrics_summary(self, ax, metrics: Dict[str, Any], best_metrics: Optional[Dict[str, float]] = None):
+        """Render a text-based metrics summary panel."""
+        ax.set_facecolor('#2a2a2a')
+        ax.axis('off')
+        
+        # Title
+        ax.set_title("Metrics Summary", fontweight='bold', pad=8, color='white')
+        
+        # Helper to format
+        def fmt(val): return f"{val:.4f}"
+        
+        # Define display list with keys, labels, and optimization direction
+        # direction: 'max' (higher is better) or 'min' (lower is better)
+        restoration_items = [
+            ("psnr", "PSNR", "max", "dB"),
+            ("ssim", "SSIM", "max", ""),
+            ("mse",  "MSE",  "min", ""),
+            ("mae",  "MAE",  "min", ""),
+            ("peak_error", "Peak", "min", "")
+        ]
+
+        y_pos = 0.90
+        line_height = 0.08
+        
+        ax.text(0.05, y_pos, "Restoration Metrics:", transform=ax.transAxes, 
+                fontsize=11, fontweight='bold', color='#CCCCCC')
+        y_pos -= line_height
+
+        best_metrics = best_metrics or {}
+
+        for key, label, direction, suffix in restoration_items:
+            current_val = metrics.get(key, 0.0)
+            best_val = best_metrics.get(key, None)
+            
+            is_best = False
+            if best_val is not None:
+                # Check for equality with small epsilon
+                if abs(current_val - best_val) < 1e-6:
+                    is_best = True
+            
+            # Format text
+            # Add arrow to label to indicate direction
+            arrow = "↑" if direction == "max" else "↓"
+            label_fmt = f"{label} {arrow}"
+            
+            # e.g., "  PSNR ↑ : 30.22 dB"
+            current_str = f"{current_val:.2f}" if key == 'psnr' else fmt(current_val)
+            text_line = f"  {label_fmt:<8}: {current_str} {suffix}"
+            
+            # Add Best info
+            if best_val is not None:
+                best_str = f"{best_val:.2f}" if key == 'psnr' else fmt(best_val)
+                text_line += f" (Best: {best_str})"
+            
+            # Determine Color
+            color = '#FFD700' if is_best else 'white' # Gold if best
+            if is_best:
+                 text_line += " *" # Add star for reinforcement
+            
+            ax.text(0.05, y_pos, text_line, transform=ax.transAxes, 
+                    fontsize=10, family='monospace', color=color)
+            y_pos -= line_height
+
+        # Spacer
+        y_pos -= 0.02
+
+        # Attention Metrics
+        ax.text(0.05, y_pos, "Attention Stats:", transform=ax.transAxes, 
+                fontsize=11, fontweight='bold', color='#CCCCCC')
+        y_pos -= line_height
+        
+        # Max Attention
+        max_attn = metrics.get('max_attention', 0.0)
+        ax.text(0.05, y_pos, f"  Max Attn:   {fmt(max_attn)}", transform=ax.transAxes, 
+                fontsize=10, family='monospace', color='white')
+        y_pos -= line_height
+
+        # Attention Entropy
+        attn_entropy = metrics.get('attention_entropy', 0.0)
+        ax.text(0.05, y_pos, f"  Attn Entr:  {fmt(attn_entropy)}", transform=ax.transAxes, 
+                fontsize=10, family='monospace', color='white')
 
 
     def _normalize_frame(self, frame: np.ndarray, target_shape=None) -> np.ndarray:

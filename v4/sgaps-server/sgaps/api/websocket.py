@@ -22,7 +22,7 @@ from omegaconf import DictConfig
 from sgaps.core.session_manager import SessionManager, Session
 from sgaps.core.sampler import FixedUVSampler
 from sgaps.core.reconstructor import FrameReconstructor
-from sgaps.utils.metrics import compute_all_metrics, calculate_psnr, calculate_ssim, calculate_mse
+from sgaps.utils.metrics import compute_all_metrics, calculate_psnr, calculate_ssim, calculate_mse, compute_mae, compute_peak_error
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -152,6 +152,29 @@ async def process_debug_visualizations(session: Session):
     # Get event loop for executor
     loop = asyncio.get_running_loop()
     
+    # Calculate session-wide best metrics
+    # Calculate session-wide best metrics
+    best_metrics = {}
+    if session.debug_buffer:
+        try:
+            # Filter distinct metric lists
+            psnr_vals = [d.get('psnr', -1.0) for d in session.debug_buffer if d.get('psnr') is not None]
+            ssim_vals = [d.get('ssim', -1.0) for d in session.debug_buffer if d.get('ssim') is not None]
+            mse_vals  = [d.get('mse', float('inf')) for d in session.debug_buffer if d.get('mse') is not None]
+            mae_vals  = [d.get('mae', float('inf')) for d in session.debug_buffer if d.get('mae') is not None]
+            peak_vals = [d.get('peak_error', float('inf')) for d in session.debug_buffer if d.get('peak_error') is not None]
+
+            # Calculate bests (Max for Quality, Min for Error)
+            best_metrics['psnr'] = max(psnr_vals) if psnr_vals else 0.0
+            best_metrics['ssim'] = max(ssim_vals) if ssim_vals else 0.0
+            best_metrics['mse']  = min(mse_vals) if mse_vals else float('inf')
+            best_metrics['mae']  = min(mae_vals) if mae_vals else float('inf')
+            best_metrics['peak_error'] = min(peak_vals) if peak_vals else float('inf')
+            
+            logger.info(f"Session Bests - PSNR: {best_metrics['psnr']:.2f}, MSE: {best_metrics['mse']:.4f}")
+        except Exception as e:
+            logger.warning(f"Failed to calculate best metrics: {e}")
+
     for i, data in enumerate(session.debug_buffer):
         # Use pre-allocated step from buffer time (ensures monotonically increasing order)
         global_step = data.get('global_step', i)  # Fallback to index if not present
@@ -167,7 +190,8 @@ async def process_debug_visualizations(session: Session):
                     state_vector=d["state_vector"],
                     importance_map=d["importance_map"],
                     attention_weights=d["attention_weights"],
-                    metadata=d["metadata"]
+                    metadata=d["metadata"],
+                    best_metrics=best_metrics
                 )
             )
 
@@ -180,6 +204,10 @@ async def process_debug_visualizations(session: Session):
                 f"Metrics/{session.client_id}/PSNR": data['psnr'],
                 f"Metrics/{session.client_id}/SSIM": data['ssim'],
                 f"Metrics/{session.client_id}/MSE": data['mse'],
+                f"Metrics/{session.client_id}/MAE": data['mae'],
+                f"Metrics/{session.client_id}/PeakError": data['peak_error'],
+                f"Importance/{session.client_id}/MaxAttention": data.get('max_attention', 0.0),
+                f"Importance/{session.client_id}/AttentionEntropy": data.get('attention_entropy', 0.0),
             }, step=global_step)
             logger.info(f"Logged post-session viz for frame {data['metadata']['frame_id']} at step {global_step}")
         except Exception as e:
@@ -488,6 +516,8 @@ async def handle_frame_data_debug(client_id: str, payload: dict):
             psnr = calculate_psnr(original_frame_resized, reconstructed_frame)
             ssim = calculate_ssim(original_frame_resized, reconstructed_frame)
             mse = calculate_mse(original_frame_resized, reconstructed_frame)
+            mae = compute_mae(original_frame_resized, reconstructed_frame)
+            peak_error = compute_peak_error(original_frame_resized, reconstructed_frame)
 
             importance_map_np = None
             if importance_map is not None:
@@ -499,6 +529,9 @@ async def handle_frame_data_debug(client_id: str, payload: dict):
             
             # Detach attention weights to CPU/Numpy to prevent GPU OOM
             attn_weights_np = None
+            max_attention = 0.0
+            attention_entropy = 0.0
+            
             if attn_weights is not None:
                 import torch
                 if isinstance(attn_weights, torch.Tensor):
@@ -507,6 +540,49 @@ async def handle_frame_data_debug(client_id: str, payload: dict):
                     attn_weights_np = [t.detach().cpu().numpy() if isinstance(t, torch.Tensor) else t for t in attn_weights]
                 else:
                     attn_weights_np = attn_weights
+                
+                # Calculate Attention Statistics
+                try:
+                    # Flatten to handle various shapes [heads, S, S] or [batch, heads, S, S]
+                    if isinstance(attn_weights_np, list):
+                        flat_attn = np.concatenate([np.array(a).flatten() for a in attn_weights_np])
+                    else:
+                        flat_attn = np.array(attn_weights_np).flatten()
+                    
+                    if flat_attn.size > 0:
+                        # Max Attention
+                        max_attention = float(np.max(flat_attn))
+                        
+                        # Entropy: -sum(p * log(p))
+                        # Clip to avoid log(0)
+                        eps = 1e-10
+                        flat_attn = np.clip(flat_attn, eps, 1.0)
+                        # Normalize just in case, though softmax usually ensures sum=1 per row
+                        # Here we want entropy of the distribution of attention values? 
+                        # Or row-wise entropy averaged? 
+                        # Let's do scalar entropy of the entire flattened distribution as a proxy for "peakiness"
+                        # If highly peaked, entropy is low. If uniform, entropy is high.
+                        # Re-normalize flattened array to treat as a single probability distribution for scalar entropy
+                        p = flat_attn / np.sum(flat_attn)
+                        attention_entropy = float(-np.sum(p * np.log2(p)))
+                except Exception as e:
+                    logger.warning(f"Error calculating attention metrics: {e}")
+                    max_attention = 0.0
+                    attention_entropy = 0.0
+
+            # Construct metadata with metrics included for the visualizer
+            metadata_dict = {
+                "frame_id": frame_id, 
+                "timestamp": payload.get("timestamp", 0.0), 
+                "client_id": client_id,
+                "psnr": psnr,
+                "ssim": ssim,
+                "mse": mse,
+                "mae": mae,
+                "peak_error": peak_error,
+                "max_attention": max_attention,
+                "attention_entropy": attention_entropy
+            }
 
             session.debug_buffer.append({
                 "global_step": global_step,  # Pre-allocated step for WandB logging
@@ -516,10 +592,14 @@ async def handle_frame_data_debug(client_id: str, payload: dict):
                 "state_vector": state_vector,
                 "importance_map": importance_map_np,
                 "attention_weights": attn_weights_np,
-                "metadata": {"frame_id": frame_id, "timestamp": payload.get("timestamp", 0.0), "client_id": client_id},
+                "metadata": metadata_dict,
                 "psnr": psnr,
                 "ssim": ssim,
                 "mse": mse,
+                "mae": mae,
+                "peak_error": peak_error,
+                "max_attention": max_attention,
+                "attention_entropy": attention_entropy,
             })
             logger.info(f"[Debug] Buffered frame {frame_id} for post-session visualization.")
 

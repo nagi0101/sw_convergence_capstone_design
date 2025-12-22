@@ -107,6 +107,32 @@ def compute_ssim(
     )
 
 
+
+def compute_mae(
+    reconstructed: np.ndarray,
+    ground_truth: np.ndarray
+) -> float:
+    """
+    Compute Mean Absolute Error.
+    """
+    if reconstructed.shape != ground_truth.shape:
+        logger.warning("Shape mismatch in MAE computation")
+        return float('inf')
+    return float(np.mean(np.abs(reconstructed.astype(float) - ground_truth.astype(float))))
+
+
+def compute_peak_error(
+    reconstructed: np.ndarray,
+    ground_truth: np.ndarray
+) -> float:
+    """
+    Compute Peak Absolute Error (Max Difference).
+    """
+    if reconstructed.shape != ground_truth.shape:
+        return float('inf')
+    return float(np.max(np.abs(reconstructed.astype(float) - ground_truth.astype(float))))
+
+
 def compute_all_metrics(
     reconstructed: np.ndarray,
     ground_truth: np.ndarray
@@ -124,7 +150,9 @@ def compute_all_metrics(
     return {
         "mse": compute_mse(reconstructed, ground_truth),
         "psnr": compute_psnr(reconstructed, ground_truth),
-        "ssim": compute_ssim(reconstructed, ground_truth)
+        "ssim": compute_ssim(reconstructed, ground_truth),
+        "mae": compute_mae(reconstructed, ground_truth),
+        "peak_error": compute_peak_error(reconstructed, ground_truth)
     }
 
 
@@ -141,7 +169,8 @@ def format_metrics(metrics: Dict[str, float]) -> str:
     return (
         f"MSE: {metrics.get('mse', 0):.4f}, "
         f"PSNR: {metrics.get('psnr', 0):.2f} dB, "
-        f"SSIM: {metrics.get('ssim', 0):.4f}"
+        f"SSIM: {metrics.get('ssim', 0):.4f}, "
+        f"MAE: {metrics.get('mae', 0):.4f}"
     )
 
 
