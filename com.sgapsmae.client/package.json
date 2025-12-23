@@ -1,0 +1,30 @@
+{
+    "name": "com.sgapsmae.client",
+    "version": "1.0.0",
+    "displayName": "SGAPS-MAE Client",
+    "description": "Lightweight client for Server-Guided Adaptive Pixel Sampling MAE game session replay system. Provides minimal overhead pixel extraction and network communication for game frame recording.",
+    "unity": "2021.3",
+    "unityRelease": "0f1",
+    "documentationUrl": "https://github.com/nagi0101/sw_convergence_capstone_design",
+    "changelogUrl": "https://github.com/nagi0101/sw_convergence_capstone_design/blob/main/CHANGELOG.md",
+    "licensesUrl": "https://github.com/nagi0101/sw_convergence_capstone_design/blob/main/LICENSE",
+    "keywords": [
+        "game-replay",
+        "video-compression",
+        "machine-learning",
+        "pixel-sampling",
+        "streaming"
+    ],
+    "author": {
+        "name": "SW Convergence Capstone Design Team",
+        "url": "https://github.com/nagi0101/sw_convergence_capstone_design"
+    },
+    "type": "library",
+    "samples": [
+        {
+            "displayName": "Basic Usage",
+            "description": "Basic example of using SGAPS-MAE client for game recording",
+            "path": "Samples~/BasicUsage"
+        }
+    ]
+}
